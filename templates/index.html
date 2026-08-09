@@ -325,51 +325,6 @@
       .trips-header > :nth-child(4), .trip-row > :nth-child(4) { display: none; }
     }
 
-    /* ── Vehicle management panel ────────────── */
-    .vehicles-empty { text-align: center; padding: 18px 0; color: var(--muted); font-size: .85rem; }
-    .vehicle-list { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
-    .vehicle-item {
-      display: flex; align-items: center; gap: 12px;
-      padding: 10px 14px; border: 1.5px solid var(--border);
-      border-radius: var(--radius-sm); background: #FAFBFD;
-    }
-    .vehicle-info { flex: 1; min-width: 0; }
-    .vehicle-name { font-weight: 600; font-size: .88rem; color: var(--text); }
-    .vehicle-sub-text { font-size: .75rem; color: var(--muted); margin-top: 1px; }
-    .vehicle-del {
-      width: 28px; height: 28px; border-radius: 6px; flex-shrink: 0;
-      background: transparent; border: none; color: #CBD5E1;
-      cursor: pointer; display: flex; align-items: center; justify-content: center;
-      font-size: .75rem; transition: all .2s;
-    }
-    .vehicle-del:hover { background: #FEF2F2; color: #EF4444; }
-    .btn-add-vehicle {
-      padding: 5px 12px; border-radius: 8px; white-space: nowrap;
-      border: 1.5px dashed var(--border); background: transparent;
-      color: var(--muted); font-size: .8rem; font-weight: 600;
-      font-family: 'Inter', sans-serif; cursor: pointer;
-      display: flex; align-items: center; gap: 5px; transition: all .2s;
-    }
-    .btn-add-vehicle:hover { border-color: var(--primary); color: var(--primary); background: #EEF2FF; }
-    .vehicle-add-form {
-      margin-top: 14px; padding: 14px;
-      border: 1.5px solid #C7D2FE; border-radius: var(--radius-sm);
-      background: #EEF2FF; display: none;
-    }
-    .vehicle-add-form.show { display: block; }
-    .v-form-row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-bottom: 10px; }
-    .v-form-full { margin-bottom: 10px; }
-    .v-form-input {
-      width: 100%; padding: 9px 12px;
-      border: 1.5px solid var(--border); border-radius: 8px;
-      font-family: 'Inter', sans-serif; font-size: .85rem; color: var(--text);
-      outline: none; background: white; transition: border-color .2s;
-    }
-    .v-form-input:focus { border-color: var(--primary); }
-    .v-form-footer { display: flex; gap: 8px; justify-content: flex-end; margin-top: 4px; }
-    .v-form-error { font-size: .78rem; color: #EF4444; margin-top: 6px; display: none; }
-    .v-form-error.show { display: block; }
-
     /* ── Trip form extra fields ──────────────── */
     .trip-extras { margin-top: 16px; padding-top: 16px; border-top: 1.5px solid var(--border); }
     .trip-extras-row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; margin-top: 10px; }
@@ -381,6 +336,11 @@
     }
     .form-input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(79,70,229,.12); }
     .vehicle-hint { font-size: .75rem; color: var(--muted); margin-top: 4px; min-height: 16px; }
+    .vehicle-add-link {
+      font-size: .74rem; font-weight: 600; color: var(--primary);
+      text-decoration: none;
+    }
+    .vehicle-add-link:hover { text-decoration: underline; }
 
     /* ── Trip row subtext ────────────────────── */
     .trip-sub { font-size: .72rem; color: var(--muted); margin-top: 2px; }
@@ -405,7 +365,6 @@
 
     @media (max-width: 480px) {
       .trip-extras-row { grid-template-columns: 1fr; }
-      .v-form-row { grid-template-columns: 1fr; }
       .modal-row-3 { grid-template-columns: 1fr; }
     }
   </style>
@@ -416,49 +375,6 @@
 {% include '_navbar.html' %}
 
 <div class="page">
-
-  <!-- My Vehicles -->
-  <div class="panel">
-    <div style="display:flex;align-items:center;justify-content:space-between">
-      <div class="panel-heading" style="margin-bottom:0">
-        <div class="panel-heading-icon"><i class="fas fa-car"></i></div>
-        My Vehicles
-      </div>
-      <button class="btn-add-vehicle" id="showVehicleFormBtn" onclick="toggleVehicleForm()">
-        <i class="fas fa-plus"></i> Add Vehicle
-      </button>
-    </div>
-
-    <div class="vehicle-add-form" id="vehicleAddForm">
-      <div class="v-form-full">
-        <label class="field-label" for="vehicleName">Nickname</label>
-        <input type="text" id="vehicleName" class="v-form-input" placeholder="e.g. Daily Driver, Work Truck">
-      </div>
-      <div class="v-form-row">
-        <div>
-          <label class="field-label" for="vehicleYear">Year</label>
-          <input type="text" id="vehicleYear" class="v-form-input" placeholder="2020" maxlength="4">
-        </div>
-        <div>
-          <label class="field-label" for="vehicleMake">Make</label>
-          <input type="text" id="vehicleMake" class="v-form-input" placeholder="Honda">
-        </div>
-        <div>
-          <label class="field-label" for="vehicleModel">Model</label>
-          <input type="text" id="vehicleModel" class="v-form-input" placeholder="Civic">
-        </div>
-      </div>
-      <div class="v-form-error" id="vehicleFormError"></div>
-      <div class="v-form-footer">
-        <button class="btn-modal-cancel" onclick="hideVehicleForm()">Cancel</button>
-        <button class="btn-modal-save" id="addVehicleBtn" onclick="addVehicle()">Add Vehicle</button>
-      </div>
-    </div>
-
-    <div class="vehicle-list" id="vehicleList">
-      <div class="vehicles-empty" id="vehiclesEmpty">No vehicles yet. Add one to track which car you use.</div>
-    </div>
-  </div>
 
   <!-- Log a Trip -->
   <div class="panel">
@@ -511,7 +427,10 @@
 
     <div class="trip-extras">
       <div style="margin-bottom:12px">
-        <label class="field-label" for="tripVehicle">Vehicle</label>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+          <label class="field-label" for="tripVehicle" style="margin-bottom:0">Vehicle</label>
+          <a href="/my-vehicles" class="vehicle-add-link" target="_blank" rel="noopener">+ Add</a>
+        </div>
         <select id="tripVehicle" class="form-input vehicle-select">
           <option value="">— No vehicle (optional) —</option>
         </select>
@@ -700,6 +619,8 @@ function refreshTimeDisplays() {
 
 
 // ─── Vehicle management ───────────────────────────────────────────────────
+// Full CRUD lives on the /my-vehicles page; the dashboard only needs the
+// list to populate trip-form vehicle selects.
 
 let vehiclesList = [];
 
@@ -707,31 +628,8 @@ async function loadVehicles() {
   try {
     const resp = await fetch('/vehicles');
     vehiclesList = await resp.json();
-    renderVehicleList();
     populateVehicleSelects();
   } catch { /* non-fatal */ }
-}
-
-function renderVehicleList() {
-  const listEl  = document.getElementById('vehicleList');
-  const emptyEl = document.getElementById('vehiclesEmpty');
-  listEl.querySelectorAll('.vehicle-item').forEach(el => el.remove());
-  if (!vehiclesList.length) { emptyEl.style.display = ''; return; }
-  emptyEl.style.display = 'none';
-  vehiclesList.forEach(v => {
-    const item = document.createElement('div');
-    item.className = 'vehicle-item';
-    item.id = `vehicle-${v.id}`;
-    item.innerHTML = `
-      <div class="vehicle-info">
-        <div class="vehicle-name">${escHtml(v.name)}</div>
-        ${v.sub ? `<div class="vehicle-sub-text">${escHtml(v.sub)}</div>` : ''}
-      </div>
-      <button class="vehicle-del" onclick="deleteVehicle(${v.id})" title="Remove vehicle">
-        <i class="fas fa-trash-alt"></i>
-      </button>`;
-    listEl.appendChild(item);
-  });
 }
 
 function populateVehicleSelects() {
@@ -754,87 +652,6 @@ function vehicleHintChange(selectId, hintId) {
   const hint = document.getElementById(hintId);
   const opt  = sel.options[sel.selectedIndex];
   hint.textContent = opt?.dataset.sub || '';
-}
-
-function toggleVehicleForm() {
-  const form = document.getElementById('vehicleAddForm');
-  const willShow = !form.classList.contains('show');
-  form.classList.toggle('show', willShow);
-  if (willShow) document.getElementById('vehicleName').focus();
-}
-
-function hideVehicleForm() {
-  document.getElementById('vehicleAddForm').classList.remove('show');
-  ['vehicleName','vehicleYear','vehicleMake','vehicleModel'].forEach(id => {
-    document.getElementById(id).value = '';
-  });
-  const errEl = document.getElementById('vehicleFormError');
-  errEl.textContent = '';
-  errEl.classList.remove('show');
-}
-
-async function addVehicle() {
-  const name  = document.getElementById('vehicleName').value.trim();
-  const year  = document.getElementById('vehicleYear').value.trim();
-  const make  = document.getElementById('vehicleMake').value.trim();
-  const model = document.getElementById('vehicleModel').value.trim();
-  const errEl = document.getElementById('vehicleFormError');
-  errEl.classList.remove('show');
-
-  if (!name) {
-    errEl.textContent = 'Nickname is required.';
-    errEl.classList.add('show');
-    document.getElementById('vehicleName').focus();
-    return;
-  }
-
-  const btn = document.getElementById('addVehicleBtn');
-  btn.disabled = true;
-  btn.textContent = 'Adding…';
-  try {
-    const resp = await fetch('/vehicles', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, year, make, model })
-    });
-    const data = await resp.json();
-    if (!resp.ok) {
-      errEl.textContent = data.error || 'Failed to add vehicle.';
-      errEl.classList.add('show');
-      return;
-    }
-    vehiclesList.push(data);
-    vehiclesList.sort((a, b) => a.name.localeCompare(b.name));
-    renderVehicleList();
-    populateVehicleSelects();
-    hideVehicleForm();
-  } catch {
-    errEl.textContent = 'Network error. Could not add vehicle.';
-    errEl.classList.add('show');
-  } finally {
-    btn.disabled = false;
-    btn.textContent = 'Add Vehicle';
-  }
-}
-
-async function deleteVehicle(id) {
-  if (!confirm('Remove this vehicle? Trips using it will have the vehicle cleared.')) return;
-  try {
-    const resp = await fetch(`/vehicles/${id}`, { method: 'DELETE' });
-    if (!resp.ok) return;
-    vehiclesList = vehiclesList.filter(v => v.id !== id);
-    document.getElementById(`vehicle-${id}`)?.remove();
-    if (!vehiclesList.length) document.getElementById('vehiclesEmpty').style.display = '';
-    populateVehicleSelects();
-    document.querySelectorAll('.trip-row').forEach(row => {
-      if (String(row.dataset.vehicleId) === String(id)) {
-        row.dataset.vehicleId = '';
-        row.dataset.vehicleName = '';
-        const sub = row.querySelector('.trip-vehicle-sub');
-        if (sub) { sub.textContent = ''; sub.style.display = 'none'; }
-      }
-    });
-  } catch { /* silent */ }
 }
 
 

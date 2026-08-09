@@ -567,6 +567,12 @@ def delete_vehicle(vehicle_id):
     return jsonify({'success': True})
 
 
+@app.route('/my-vehicles')
+@login_required
+def vehicles_page():
+    return render_template('vehicles.html', username=current_user.username)
+
+
 # ---------------------------------------------------------------------------
 # Profile routes
 # ---------------------------------------------------------------------------
