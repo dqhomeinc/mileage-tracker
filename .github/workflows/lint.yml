@@ -1,0 +1,25 @@
+name: Lint
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ruff
+        run: pip install ruff
+
+      # E9 (syntax errors) + F (pyflakes: undefined names, unused imports, etc).
+      # Intentionally excludes style-only rule sets so this catches real bugs
+      # without blocking merges over formatting preferences.
+      - name: Lint with ruff
+        run: ruff check . --select E9,F
