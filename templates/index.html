@@ -150,6 +150,16 @@
     .confirm-edit { background: white; color: var(--muted); border: 1px solid var(--border); }
     .confirm-edit:hover { background: var(--bg); }
 
+    /* ── Feasibility warning ─────────────────── */
+    .speed-warning {
+      display: none; align-items: flex-start; gap: 8px;
+      padding: 8px 12px; margin-top: 10px;
+      background: #FFFBEB; border: 1.5px solid #FCD34D;
+      border-radius: 8px; font-size: 0.8rem; color: #92400E;
+    }
+    .speed-warning.show { display: flex; }
+    .speed-warning i { flex-shrink: 0; margin-top: 1px; }
+
     /* ── Calculate button ────────────────────── */
     .btn-calc {
       width: 100%; margin-top: 20px; padding: 13px;
@@ -450,6 +460,10 @@
           <input type="time" id="tripEndTime" class="form-input">
         </div>
       </div>
+      <div class="speed-warning" id="tripSpeedWarning">
+        <i class="fas fa-triangle-exclamation"></i>
+        <span id="tripSpeedWarningText"></span>
+      </div>
     </div>
 
     <button id="calculateBtn" class="btn-calc">
@@ -567,6 +581,10 @@
         <label>End Time</label>
         <input type="time" id="editEndTime">
       </div>
+    </div>
+    <div class="speed-warning" id="editSpeedWarning">
+      <i class="fas fa-triangle-exclamation"></i>
+      <span id="editSpeedWarningText"></span>
     </div>
     <div class="modal-footer">
       <button class="btn-modal-cancel" onclick="closeEditModal()">Cancel</button>
@@ -873,6 +891,63 @@ initTimeInput('editStartTime');
 initTimeInput('editEndTime');
 
 
+// ─── Trip time feasibility check ───────────────────────────────────────────
+
+const FEASIBILITY_MIN_RATIO = 0.5;
+const FEASIBILITY_MAX_RATIO = 3.0;
+
+function elapsedSeconds(startTime, endTime) {
+  if (!startTime || !endTime) return null;
+  const [sh, sm] = startTime.split(':').map(Number);
+  const [eh, em] = endTime.split(':').map(Number);
+  if ([sh, sm, eh, em].some(Number.isNaN)) return null;
+  let startMin = sh * 60 + sm, endMin = eh * 60 + em;
+  if (endMin <= startMin) endMin += 24 * 60;
+  return (endMin - startMin) * 60;
+}
+
+function feasibilityWarning(startTime, endTime, distanceMiles, durationSeconds) {
+  if (durationSeconds == null || !distanceMiles) return null;
+  const elapsed = elapsedSeconds(startTime, endTime);
+  if (elapsed == null || elapsed <= 0) return null;
+  const elapsedMin = Math.round(elapsed / 60), expectedMin = Math.round(durationSeconds / 60);
+  if (elapsed < durationSeconds * FEASIBILITY_MIN_RATIO) {
+    return `${distanceMiles} miles in ${elapsedMin} min is much faster than the ` +
+           `typical ~${expectedMin} min for this route — double check the times.`;
+  }
+  if (elapsed > durationSeconds * FEASIBILITY_MAX_RATIO) {
+    return `${distanceMiles} miles in ${elapsedMin} min is much longer than the ` +
+           `typical ~${expectedMin} min for this route — double check the times.`;
+  }
+  return null;
+}
+
+function updateSpeedWarning(warningElId, textElId, warning) {
+  document.getElementById(textElId).textContent = warning || '';
+  document.getElementById(warningElId).classList.toggle('show', !!warning);
+}
+
+function checkTripSpeedLive() {
+  const w = lastResult && feasibilityWarning(
+    getTimeValue('tripStartTime'), getTimeValue('tripEndTime'),
+    lastResult.distance_miles, lastResult.duration_seconds
+  );
+  updateSpeedWarning('tripSpeedWarning', 'tripSpeedWarningText', w);
+}
+document.getElementById('tripStartTime').addEventListener('change', checkTripSpeedLive);
+document.getElementById('tripEndTime').addEventListener('change', checkTripSpeedLive);
+
+function checkEditSpeedLive() {
+  const w = editingTrip && feasibilityWarning(
+    getTimeValue('editStartTime'), getTimeValue('editEndTime'),
+    editingTrip.miles, editingTrip.durationSeconds
+  );
+  updateSpeedWarning('editSpeedWarning', 'editSpeedWarningText', w);
+}
+document.getElementById('editStartTime').addEventListener('change', checkEditSpeedLive);
+document.getElementById('editEndTime').addEventListener('change', checkEditSpeedLive);
+
+
 document.getElementById('tripVehicle').addEventListener('change', () => vehicleHintChange('tripVehicle', 'tripVehicleHint'));
 document.getElementById('editVehicle').addEventListener('change', () => vehicleHintChange('editVehicle', 'editVehicleHint'));
 
@@ -886,6 +961,7 @@ document.getElementById('calculateBtn').addEventListener('click', async () => {
   const end   = document.getElementById('end').value.trim();
   hideError();
   hideResult();
+  updateSpeedWarning('tripSpeedWarning', 'tripSpeedWarningText', null);
 
   if (!start || !end) { showError('Please enter both a start and end location.'); return; }
 
@@ -906,6 +982,7 @@ document.getElementById('calculateBtn').addEventListener('click', async () => {
     document.getElementById('resultMiles').textContent = data.distance_miles;
     document.getElementById('resultRoute').textContent = `${data.start} → ${data.end}`;
     document.getElementById('resultPanel').classList.remove('d-none');
+    checkTripSpeedLive();
   } catch {
     showError('Network error. Please check your connection and try again.');
   } finally {
@@ -960,6 +1037,13 @@ document.getElementById('logBtn').addEventListener('click', async () => {
     initTimeInput('tripStartTime');
     initTimeInput('tripEndTime');
     lastResult = null;
+
+    if (data.warning) {
+      updateSpeedWarning('tripSpeedWarning', 'tripSpeedWarningText', data.warning);
+      setTimeout(() => updateSpeedWarning('tripSpeedWarning', 'tripSpeedWarningText', null), 6000);
+    } else {
+      updateSpeedWarning('tripSpeedWarning', 'tripSpeedWarningText', null);
+    }
   } catch {
     showError('Network error. Could not save trip.');
   } finally {
@@ -1021,6 +1105,7 @@ function prependTripRow(trip, prepend = true) {
   row.dataset.tripDate    = trip.trip_date    || '';
   row.dataset.startTime   = trip.start_time   || '';
   row.dataset.endTime     = trip.end_time     || '';
+  row.dataset.durationSeconds = trip.duration_seconds || '';
   row.innerHTML = `
     <div class="trip-loc">
       <div class="trip-loc-main" title="${escHtml(trip.start)}">${escHtml(trip.start)}</div>
@@ -1122,7 +1207,11 @@ let editingTrip = null;
 
 function openEditModal(id) {
   const row = document.getElementById(`trip-${id}`);
-  editingTrip = { id, miles: parseFloat(row.dataset.miles) };
+  editingTrip = {
+    id,
+    miles: parseFloat(row.dataset.miles),
+    durationSeconds: row.dataset.durationSeconds ? parseInt(row.dataset.durationSeconds, 10) : null,
+  };
   document.getElementById('editStart').value = row.dataset.start;
   document.getElementById('editEnd').value   = row.dataset.end;
   document.getElementById('editMiles').textContent = row.dataset.miles;
@@ -1138,6 +1227,7 @@ function openEditModal(id) {
     el.value   = val;
     el._userSet = !!val;
   });
+  checkEditSpeedLive();
 
   document.getElementById('editModal').classList.add('open');
 }
@@ -1145,6 +1235,7 @@ function openEditModal(id) {
 function closeEditModal() {
   document.getElementById('editModal').classList.remove('open');
   editingTrip = null;
+  updateSpeedWarning('editSpeedWarning', 'editSpeedWarningText', null);
 }
 
 document.getElementById('editModal').addEventListener('click', (e) => {
@@ -1167,7 +1258,9 @@ async function recalcEditDistance() {
     const data = await resp.json();
     if (resp.ok) {
       editingTrip.miles = data.distance_miles;
+      editingTrip.durationSeconds = data.duration_seconds;
       document.getElementById('editMiles').textContent = data.distance_miles;
+      checkEditSpeedLive();
     }
   } catch { /* silent */ }
   finally {
@@ -1185,6 +1278,7 @@ async function saveEdit() {
   const vehicleVal = document.getElementById('editVehicle').value;
   const payload = {
     start, end, distance_miles: editingTrip.miles,
+    duration_seconds: editingTrip.durationSeconds,
     vehicle_id: vehicleVal ? parseInt(vehicleVal) : null,
     trip_date:  document.getElementById('editTripDate').value  || null,
     start_time: getTimeValue('editStartTime'),
@@ -1214,6 +1308,7 @@ async function saveEdit() {
     row.dataset.tripDate    = data.trip_date    || '';
     row.dataset.startTime   = data.start_time   || '';
     row.dataset.endTime     = data.end_time     || '';
+    row.dataset.durationSeconds = data.duration_seconds || '';
 
     const mainStart = row.querySelector('.trip-loc-main');
     mainStart.textContent = data.start; mainStart.title = data.start;
@@ -1240,6 +1335,7 @@ async function saveEdit() {
       totalMilesAccum = totalMilesAccum - oldMiles + data.miles;
       updateTotalDisplay();
     }
+    if (data.warning) alert(data.warning);
     closeEditModal();
   } catch { alert('Network error. Could not save changes.'); }
   finally { btn.disabled = false; btn.textContent = 'Save Changes'; }

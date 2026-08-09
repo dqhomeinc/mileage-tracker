@@ -83,6 +83,7 @@ class Trip(db.Model):
     trip_date      = db.Column(db.String(10), nullable=True)
     start_time     = db.Column(db.String(5),  nullable=True)
     end_time       = db.Column(db.String(5),  nullable=True)
+    duration_seconds = db.Column(db.Integer, nullable=True)
 
 
 @login_manager.user_loader
@@ -113,6 +114,7 @@ def _trip_dict(trip, vehicle_name=None, vehicle_sub=None):
         'trip_date':    trip.trip_date,
         'start_time':   trip.start_time,
         'end_time':     trip.end_time,
+        'duration_seconds': trip.duration_seconds,
     }
 
 
@@ -128,6 +130,7 @@ def _migrate_db():
                 ('trip_date',  'VARCHAR(10)'),
                 ('start_time', 'VARCHAR(5)'),
                 ('end_time',   'VARCHAR(5)'),
+                ('duration_seconds', 'INTEGER'),
             ]
             for col, typ in additions:
                 if col not in existing:
@@ -143,6 +146,7 @@ def _migrate_db():
                 ('trip_date',  'VARCHAR(10)'),
                 ('start_time', 'VARCHAR(5)'),
                 ('end_time',   'VARCHAR(5)'),
+                ('duration_seconds', 'INTEGER'),
             ]
             for col, typ in additions:
                 if col not in existing:
@@ -261,8 +265,48 @@ def calculate_driving_miles(start_text, end_text):
     data = resp.json()
     if data.get('code') != 'Ok' or not data.get('routes'):
         raise ValueError('OSRM could not find a driving route between those locations.')
-    meters = data['routes'][0]['distance']
-    return round(meters / 1609.344, 2)
+    route = data['routes'][0]
+    miles = round(route['distance'] / 1609.344, 2)
+    duration_seconds = round(route['duration'])
+    return miles, duration_seconds
+
+
+def _elapsed_seconds(start_time, end_time):
+    """Seconds between two 'HH:MM' strings, assuming midnight wraparound
+    if end <= start. None if either is missing/unparseable."""
+    if not start_time or not end_time:
+        return None
+    try:
+        sh, sm = map(int, start_time.split(':'))
+        eh, em = map(int, end_time.split(':'))
+    except (ValueError, AttributeError):
+        return None
+    start_min, end_min = sh * 60 + sm, eh * 60 + em
+    if end_min <= start_min:
+        end_min += 24 * 60
+    return (end_min - start_min) * 60
+
+
+FEASIBILITY_MIN_RATIO = 0.5  # flag "too fast" if elapsed < 50% of OSRM's expected duration
+FEASIBILITY_MAX_RATIO = 3.0  # flag "too slow" if elapsed > 300% of OSRM's expected duration
+
+
+def check_trip_feasibility(start_time, end_time, distance_miles, duration_seconds):
+    """Warning string if the clock-time gap is implausible (too fast or too
+    slow) for the distance, else None. Pure function, never raises — non-blocking."""
+    if duration_seconds is None or not distance_miles:
+        return None
+    elapsed = _elapsed_seconds(start_time, end_time)
+    if elapsed is None or elapsed <= 0:
+        return None
+    elapsed_min, expected_min = round(elapsed / 60), round(duration_seconds / 60)
+    if elapsed < duration_seconds * FEASIBILITY_MIN_RATIO:
+        return (f'{distance_miles} miles in {elapsed_min} min is much faster than the '
+                f'typical ~{expected_min} min for this route — double check the times.')
+    if elapsed > duration_seconds * FEASIBILITY_MAX_RATIO:
+        return (f'{distance_miles} miles in {elapsed_min} min is much longer than the '
+                f'typical ~{expected_min} min for this route — double check the times.')
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -408,12 +452,17 @@ def calculate():
     if not start or not end:
         return jsonify({'error': 'Both start and end locations are required.'}), 400
     try:
-        miles = calculate_driving_miles(start, end)
+        miles, duration_seconds = calculate_driving_miles(start, end)
     except ValueError as e:
         return jsonify({'error': str(e)}), 422
     except Exception:
         return jsonify({'error': 'Failed to calculate distance. Please try again.'}), 500
-    return jsonify({'distance_miles': miles, 'start': start, 'end': end})
+    return jsonify({
+        'distance_miles': miles,
+        'start': start,
+        'end': end,
+        'duration_seconds': duration_seconds,
+    })
 
 
 @app.route('/log', methods=['POST'])
@@ -440,6 +489,8 @@ def log_trip():
         else:
             vehicle_id = None
 
+    warning = check_trip_feasibility(start_time, end_time, float(distance_miles), data.get('duration_seconds'))
+
     trip = Trip(
         user_id=current_user.id,
         start_location=start,
@@ -449,10 +500,14 @@ def log_trip():
         trip_date=trip_date,
         start_time=start_time,
         end_time=end_time,
+        duration_seconds=data.get('duration_seconds'),
     )
     db.session.add(trip)
     db.session.commit()
-    return jsonify({'success': True, 'trip': _trip_dict(trip, vehicle_name, vehicle_sub)})
+    resp = {'success': True, 'trip': _trip_dict(trip, vehicle_name, vehicle_sub)}
+    if warning:
+        resp['warning'] = warning
+    return jsonify(resp)
 
 
 @app.route('/history')
@@ -497,6 +552,11 @@ def update_trip(trip_id):
         else:
             vehicle_id = None
 
+    # Fall back to the trip's already-stored duration when the client didn't
+    # send a fresh one (i.e. the route wasn't recalculated this edit).
+    duration_seconds = data.get('duration_seconds') or trip.duration_seconds
+    warning = check_trip_feasibility(start_time, end_time, float(distance_miles), duration_seconds)
+
     trip.start_location = start
     trip.end_location   = end
     trip.distance_miles = float(distance_miles)
@@ -504,8 +564,12 @@ def update_trip(trip_id):
     trip.trip_date      = trip_date
     trip.start_time     = start_time
     trip.end_time       = end_time
+    trip.duration_seconds = duration_seconds
     db.session.commit()
-    return jsonify(_trip_dict(trip, vehicle_name, vehicle_sub))
+    resp = _trip_dict(trip, vehicle_name, vehicle_sub)
+    if warning:
+        resp['warning'] = warning
+    return jsonify(resp)
 
 
 @app.route('/history/<int:trip_id>', methods=['DELETE'])
