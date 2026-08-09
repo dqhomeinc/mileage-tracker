@@ -1,28 +1,22 @@
-databases:
-  - name: mileage-db
-    databaseName: mileage
-    user: mileage_user
-    plan: free
-
 services:
   - type: web
     name: mileage-tracker
     runtime: python
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn main:app
-    plan: starter
+    plan: free
     envVars:
       - key: SECRET_KEY
         generateValue: true
       - key: DATABASE_URL
-        fromDatabase:
-          name: mileage-db
-          property: connectionString
+        sync: false
       - key: PYTHON_VERSION
         value: 3.11.0
       - key: MAIL_SERVER
         value: smtp.gmail.com
       - key: MAIL_PORT
         value: 587
+      # DATABASE_URL: set to your Neon connection string (Neon dashboard →
+      # Connection Details). Any ?sslmode=... suffix is fine — main.py strips it.
       # Set MAIL_USERNAME and MAIL_PASSWORD manually in the Render dashboard
       # after deployment (Dashboard → mileage-tracker → Environment)

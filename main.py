@@ -28,6 +28,9 @@ if _db_url.startswith('postgres://'):
     _db_url = 'postgresql+pg8000://' + _db_url[len('postgres://'):]
 elif _db_url.startswith('postgresql://'):
     _db_url = 'postgresql+pg8000://' + _db_url[len('postgresql://'):]
+# pg8000 negotiates SSL automatically and doesn't accept a sslmode kwarg,
+# so strip query params like Neon's default "?sslmode=require".
+_db_url = _db_url.split('?', 1)[0]
 app.config['SQLALCHEMY_DATABASE_URI'] = _db_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
