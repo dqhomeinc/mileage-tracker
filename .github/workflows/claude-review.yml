@@ -22,6 +22,10 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Forces tag mode instead of agent mode. Agent mode (the default when
+          # a `prompt` input is supplied) never wires up the comment-posting
+          # tool, so without this the review runs but nothing gets posted.
+          track_progress: true
           prompt: |
             Review this pull request and post a single PR review comment with:
 
