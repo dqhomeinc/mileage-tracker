@@ -10,7 +10,6 @@ from flask_login import (
     LoginManager, UserMixin, login_user, logout_user,
     login_required, current_user
 )
-from flask_mail import Mail, Message
 from werkzeug.security import generate_password_hash, check_password_hash
 
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -34,17 +33,14 @@ _db_url = _db_url.split('?', 1)[0]
 app.config['SQLALCHEMY_DATABASE_URI'] = _db_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-app.config['MAIL_SERVER'] = os.environ.get('MAIL_SERVER', 'smtp.gmail.com')
-app.config['MAIL_PORT'] = int(os.environ.get('MAIL_PORT', 587))
-app.config['MAIL_USE_TLS'] = True
-app.config['MAIL_USERNAME'] = os.environ.get('MAIL_USERNAME')
-app.config['MAIL_PASSWORD'] = os.environ.get('MAIL_PASSWORD')
-app.config['MAIL_DEFAULT_SENDER'] = os.environ.get('MAIL_USERNAME')
+# Brevo (HTTPS email API) — Railway blocks outbound SMTP on non-Pro plans,
+# so password reset emails are sent over HTTPS instead of raw SMTP.
+app.config['BREVO_API_KEY'] = os.environ.get('BREVO_API_KEY')
+app.config['BREVO_SENDER_EMAIL'] = os.environ.get('BREVO_SENDER_EMAIL')
 
 db = SQLAlchemy(app)
 login_manager = LoginManager(app)
 login_manager.login_view = 'login'
-mail = Mail(app)
 
 
 # ---------------------------------------------------------------------------
@@ -191,14 +187,32 @@ def verify_reset_token(token, max_age=3600):
     except (SignatureExpired, BadSignature):
         return None
 
+BREVO_API_URL = 'https://api.brevo.com/v3/smtp/email'
+
+
+def _send_email(to, subject, html):
+    resp = requests.post(
+        BREVO_API_URL,
+        headers={'api-key': app.config['BREVO_API_KEY'], 'Content-Type': 'application/json'},
+        json={
+            'sender': {'email': app.config['BREVO_SENDER_EMAIL']},
+            'to': [{'email': to}],
+            'subject': subject,
+            'htmlContent': html,
+        },
+        timeout=10
+    )
+    resp.raise_for_status()
+
+
 def send_reset_email(user, token):
     reset_url = url_for('reset_password', token=token, _external=True)
-    if not app.config.get('MAIL_USERNAME'):
+    if not _mail_config_ok():
         app.logger.info('DEV — password reset URL: %s', reset_url)
         return
-    msg = Message(
+    _send_email(
+        to=user.email,
         subject='Mileage Tracker — Password Reset',
-        recipients=[user.email],
         html=(
             f'<p>Hi {user.username},</p>'
             f'<p>Click the link below to reset your password. '
@@ -207,7 +221,10 @@ def send_reset_email(user, token):
             f'<p>If you did not request this, you can ignore this email.</p>'
         )
     )
-    mail.send(msg)
+
+
+def _mail_config_ok():
+    return bool(app.config.get('BREVO_API_KEY') and app.config.get('BREVO_SENDER_EMAIL'))
 
 
 # ---------------------------------------------------------------------------
@@ -327,12 +344,10 @@ def forgot_password():
                 send_reset_email(user, token)
             except Exception as e:
                 app.logger.error('Failed to send reset email: %s', e)
-                flash('Could not send email. Check your MAIL_* settings in .env.', 'danger')
+                flash('Could not send email. Please try again later.', 'danger')
                 return render_template('forgot_password.html')
         # Always show the same message to prevent user enumeration
         flash('If that email is registered, a reset link has been sent. Check your inbox (and spam folder).', 'info')
-        if app.debug and not app.config.get('MAIL_USERNAME'):
-            flash('DEV MODE: No email configured — check the terminal for the reset link.', 'warning')
         return redirect(url_for('login'))
 
     return render_template('forgot_password.html')

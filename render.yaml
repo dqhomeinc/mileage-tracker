@@ -12,11 +12,8 @@ services:
         sync: false
       - key: PYTHON_VERSION
         value: 3.11.0
-      - key: MAIL_SERVER
-        value: smtp.gmail.com
-      - key: MAIL_PORT
-        value: 587
       # DATABASE_URL: set to your Neon connection string (Neon dashboard →
       # Connection Details). Any ?sslmode=... suffix is fine — main.py strips it.
-      # Set MAIL_USERNAME and MAIL_PASSWORD manually in the Render dashboard
-      # after deployment (Dashboard → mileage-tracker → Environment)
+      # Set BREVO_API_KEY and BREVO_SENDER_EMAIL (a verified Brevo sender)
+      # manually in the Render dashboard after deployment
+      # (Dashboard → mileage-tracker → Environment)
