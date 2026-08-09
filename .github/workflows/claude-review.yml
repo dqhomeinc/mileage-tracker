@@ -34,4 +34,3 @@ jobs:
                you find in the diff — skip style nits. If there are none, say so.
 
             Be concise throughout.
-          claude_args: "--allowedTools Read,Grep,Glob"
