@@ -1,6 +1,6 @@
 # Mileage Tracker
 
-**Version 0.0.2**
+**Version 0.0.3**
 
 A web app for logging and tracking driving mileage. Enter a start and end address to calculate the driving distance, save trips to your history, and export your logs.
 
@@ -33,6 +33,12 @@ A web app for logging and tracking driving mileage. Enter a start and end addres
 - **Voice input is not always working** — the Web Speech API is browser-dependent. It works best in Chrome and Edge on desktop. Safari support is inconsistent and Firefox does not support it at all. On some devices, microphone permission prompts may be dismissed silently with no visible error. If voice input appears to do nothing, try typing the address instead.
 
 ## Release Notes
+
+### v0.0.3 — August 8, 2026
+- Fixed password reset emails not sending: switched to Brevo's HTTPS email API (the previous Gmail SMTP approach was blocked by the hosting provider)
+- Removed a temporary debug endpoint and tightened error handling on the password reset flow so internal error details are no longer shown to users
+- Migrated deployment from Railway to Render, with the database moved to Neon Postgres
+- Added automated PR checks: lint, build verification, and an AI code review on every pull request
 
 ### v0.0.2 — June 28, 2026
 - Added vehicle management: create a personal vehicle list with nickname, year, make, and model; duplicate names are rejected
