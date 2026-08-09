@@ -23,8 +23,15 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: |
-            Review this pull request for correctness bugs, security issues, and
-            simplification/reuse opportunities. Only report concrete problems you
-            find in the diff — be concise and skip style nits. Post your findings
-            as a PR review comment.
+            Review this pull request and post a single PR review comment with:
+
+            1. **Summary** — 2-3 sentences on what this PR actually changes and why,
+               based on the diff and PR description.
+            2. **Risk assessment** — Low/Medium/High, with a one-line reason (e.g.
+               touches auth, changes deploy config, migrates data, pure UI tweak).
+            3. **Findings** — correctness bugs, security issues, and
+               simplification/reuse opportunities. Only report concrete problems
+               you find in the diff — skip style nits. If there are none, say so.
+
+            Be concise throughout.
           claude_args: "--allowedTools Read,Grep,Glob"
