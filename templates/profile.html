@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Profile — Mileage Tracker</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+  <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
+  <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+  <link rel="manifest" href="/static/manifest.json">
+  <meta name="theme-color" content="#4F46E5">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <style>
+    :root {
+      --primary:    #4F46E5;
+      --violet:     #7C3AED;
+      --grad:       linear-gradient(135deg, #4F46E5 0%, #7C3AED 100%);
+      --bg:         #F1F5F9;
+      --surface:    #FFFFFF;
+      --text:       #0F172A;
+      --muted:      #64748B;
+      --border:     #E2E8F0;
+      --radius:     16px;
+      --radius-sm:  10px;
+      --shadow:     0 1px 3px rgba(0,0,0,.06), 0 4px 16px rgba(79,70,229,.08);
+    }
+    *, *::before, *::after { box-sizing: border-box; }
+    body {
+      font-family: 'Inter', system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+
+    .page { max-width: 520px; margin: 0 auto; padding: 32px 16px 56px; }
+    .panel {
+      background: var(--surface);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 28px;
+      margin-bottom: 20px;
+    }
+    .panel-heading {
+      display: flex; align-items: center; gap: 10px;
+      font-size: 1rem; font-weight: 600; color: var(--text);
+      margin-bottom: 22px;
+    }
+    .panel-heading-icon {
+      width: 32px; height: 32px; border-radius: 8px;
+      background: linear-gradient(135deg, #EEF2FF, #DDD6FE);
+      display: flex; align-items: center; justify-content: center;
+      color: var(--primary); font-size: 0.8rem;
+    }
+
+    .account-row { display: flex; align-items: center; gap: 14px; margin-bottom: 16px; }
+    .account-avatar {
+      width: 48px; height: 48px; border-radius: 50%;
+      background: var(--grad);
+      display: flex; align-items: center; justify-content: center;
+      color: white; font-weight: 700; font-size: 1.1rem; flex-shrink: 0;
+    }
+    .account-name { font-weight: 600; font-size: 0.98rem; color: var(--text); }
+    .account-email { font-size: 0.85rem; color: var(--muted); margin-top: 2px; }
+
+    .field { margin-bottom: 16px; }
+    .field label {
+      display: block; font-size: 0.74rem; font-weight: 600;
+      color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em;
+      margin-bottom: 6px;
+    }
+    .field input {
+      width: 100%; padding: 11px 14px;
+      border: 1.5px solid var(--border); border-radius: var(--radius-sm);
+      font-family: 'Inter', sans-serif; font-size: .9rem; color: var(--text);
+      outline: none; transition: border-color .2s, box-shadow .2s;
+    }
+    .field input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(79,70,229,.12); }
+    .pw-wrap { position: relative; }
+    .pw-wrap input { padding-right: 42px; }
+    .pw-toggle {
+      position: absolute; right: 12px; top: 50%; transform: translateY(-50%);
+      background: none; border: none; cursor: pointer; color: var(--muted);
+      padding: 0; font-size: .95rem; line-height: 1;
+    }
+    .pw-toggle:hover { color: var(--primary); }
+
+    .btn-save {
+      padding: 10px 20px; border-radius: var(--radius-sm);
+      background: var(--grad); border: none; color: white;
+      font-size: .88rem; font-weight: 600; cursor: pointer;
+      font-family: 'Inter', sans-serif; transition: opacity .15s;
+    }
+    .btn-save:hover { opacity: .9; }
+    .btn-save:disabled { opacity: .6; cursor: not-allowed; }
+
+    .form-msg { font-size: .82rem; margin-top: 4px; margin-bottom: 14px; display: none; }
+    .form-msg.show { display: block; }
+    .form-msg.error { color: #EF4444; }
+    .form-msg.success { color: #16A34A; }
+  </style>
+</head>
+<body>
+
+{% include '_navbar.html' %}
+
+<div class="page">
+
+  <div class="panel">
+    <div class="panel-heading">
+      <div class="panel-heading-icon"><i class="fas fa-user"></i></div>
+      Account
+    </div>
+    <div class="account-row">
+      <div class="account-avatar">{{ username[0]|upper }}</div>
+      <div>
+        <div class="account-name">{{ username }}</div>
+        <div class="account-email">{{ email }}</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-heading">
+      <div class="panel-heading-icon"><i class="fas fa-lock"></i></div>
+      Change Password
+    </div>
+
+    <div class="form-msg" id="pwMsg"></div>
+
+    <div class="field">
+      <label for="currentPassword">Current Password</label>
+      <div class="pw-wrap">
+        <input type="password" id="currentPassword" placeholder="••••••••">
+        <button type="button" class="pw-toggle" onclick="togglePw(this)" tabindex="-1" aria-label="Toggle password visibility">
+          <i class="fas fa-eye"></i>
+        </button>
+      </div>
+    </div>
+    <div class="field">
+      <label for="newPassword">New Password</label>
+      <div class="pw-wrap">
+        <input type="password" id="newPassword" placeholder="••••••••">
+        <button type="button" class="pw-toggle" onclick="togglePw(this)" tabindex="-1" aria-label="Toggle password visibility">
+          <i class="fas fa-eye"></i>
+        </button>
+      </div>
+    </div>
+    <div class="field">
+      <label for="confirmNewPassword">Confirm New Password</label>
+      <div class="pw-wrap">
+        <input type="password" id="confirmNewPassword" placeholder="••••••••">
+        <button type="button" class="pw-toggle" onclick="togglePw(this)" tabindex="-1" aria-label="Toggle password visibility">
+          <i class="fas fa-eye"></i>
+        </button>
+      </div>
+    </div>
+
+    <button class="btn-save" id="savePasswordBtn" onclick="changePassword()">Update Password</button>
+  </div>
+
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+function togglePw(btn) {
+  const input = btn.parentElement.querySelector('input');
+  const icon  = btn.querySelector('i');
+  const show  = input.type === 'password';
+  input.type      = show ? 'text' : 'password';
+  icon.className  = show ? 'fas fa-eye-slash' : 'fas fa-eye';
+}
+
+async function changePassword() {
+  const current = document.getElementById('currentPassword').value;
+  const next    = document.getElementById('newPassword').value;
+  const confirm = document.getElementById('confirmNewPassword').value;
+  const msgEl   = document.getElementById('pwMsg');
+  const btn     = document.getElementById('savePasswordBtn');
+
+  msgEl.classList.remove('show', 'error', 'success');
+
+  if (!current || !next || !confirm) {
+    msgEl.textContent = 'All fields are required.';
+    msgEl.classList.add('show', 'error');
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = 'Updating…';
+  try {
+    const resp = await fetch('/profile/change-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ current_password: current, new_password: next, confirm_password: confirm })
+    });
+    const data = await resp.json();
+    if (!resp.ok) {
+      msgEl.textContent = data.error || 'Failed to update password.';
+      msgEl.classList.add('show', 'error');
+      return;
+    }
+    msgEl.textContent = 'Password updated successfully.';
+    msgEl.classList.add('show', 'success');
+    document.getElementById('currentPassword').value = '';
+    document.getElementById('newPassword').value = '';
+    document.getElementById('confirmNewPassword').value = '';
+  } catch {
+    msgEl.textContent = 'Network error. Could not update password.';
+    msgEl.classList.add('show', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Update Password';
+  }
+}
+</script>
+</body>
+</html>

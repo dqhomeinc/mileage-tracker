@@ -568,6 +568,37 @@ def delete_vehicle(vehicle_id):
 
 
 # ---------------------------------------------------------------------------
+# Profile routes
+# ---------------------------------------------------------------------------
+
+@app.route('/profile')
+@login_required
+def profile():
+    return render_template('profile.html', username=current_user.username, email=current_user.email)
+
+
+@app.route('/profile/change-password', methods=['POST'])
+@login_required
+def change_password():
+    data = request.get_json()
+    current_password = data.get('current_password') or ''
+    new_password     = data.get('new_password') or ''
+    confirm_password = data.get('confirm_password') or ''
+
+    if not current_user.check_password(current_password):
+        return jsonify({'error': 'Current password is incorrect.'}), 400
+    if new_password != confirm_password:
+        return jsonify({'error': 'New passwords do not match.'}), 400
+    pw_errors = validate_password(new_password)
+    if pw_errors:
+        return jsonify({'error': 'Password must include: ' + ', '.join(pw_errors) + '.'}), 400
+
+    current_user.set_password(new_password)
+    db.session.commit()
+    return jsonify({'success': True})
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 

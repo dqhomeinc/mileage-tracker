@@ -37,48 +37,6 @@
     }
 
     /* ── Navbar ─────────────────────────────── */
-    .app-nav {
-      background: var(--grad);
-      padding: 0 24px;
-      height: 60px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      box-shadow: 0 2px 16px rgba(79,70,229,.3);
-      position: sticky;
-      top: 0;
-      z-index: 100;
-    }
-    .nav-brand {
-      display: flex; align-items: center; gap: 10px;
-      color: white; font-weight: 700; font-size: 1.05rem; text-decoration: none;
-    }
-    .nav-logo {
-      width: 34px; height: 34px; border-radius: 8px;
-      background: rgba(255,255,255,.2);
-      display: flex; align-items: center; justify-content: center;
-      font-size: 0.95rem;
-    }
-    .nav-right { display: flex; align-items: center; gap: 10px; }
-    .user-chip {
-      display: flex; align-items: center; gap: 8px;
-      background: rgba(255,255,255,.15); border-radius: 20px;
-      padding: 4px 12px 4px 4px;
-      color: white; font-size: 0.83rem;
-    }
-    .user-avatar {
-      width: 28px; height: 28px; border-radius: 50%;
-      background: rgba(255,255,255,.3);
-      display: flex; align-items: center; justify-content: center;
-      font-size: 0.72rem; font-weight: 700; color: white;
-    }
-    .logout-link {
-      color: rgba(255,255,255,.8); font-size: 0.82rem;
-      text-decoration: none; padding: 5px 10px; border-radius: 6px;
-      transition: background .2s;
-    }
-    .logout-link:hover { background: rgba(255,255,255,.15); color: white; }
-
     /* ── Layout ─────────────────────────────── */
     .page { max-width: 680px; margin: 0 auto; padding: 32px 16px 56px; }
 
@@ -367,19 +325,6 @@
       .trips-header > :nth-child(4), .trip-row > :nth-child(4) { display: none; }
     }
 
-    /* ── Time format toggle ──────────────────── */
-    .time-toggle {
-      display: flex; align-items: center; gap: 2px;
-      background: rgba(255,255,255,.15); border-radius: 16px; padding: 3px;
-    }
-    .time-toggle-btn {
-      padding: 3px 10px; border-radius: 12px; border: none;
-      background: transparent; color: rgba(255,255,255,.7);
-      cursor: pointer; font-size: .78rem; font-weight: 600;
-      font-family: 'Inter', sans-serif; transition: all .2s;
-    }
-    .time-toggle-btn.active { background: rgba(255,255,255,.25); color: white; }
-
     /* ── Vehicle management panel ────────────── */
     .vehicles-empty { text-align: center; padding: 18px 0; color: var(--muted); font-size: .85rem; }
     .vehicle-list { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
@@ -467,23 +412,8 @@
 </head>
 <body>
 
-<nav class="app-nav">
-  <a href="/" class="nav-brand">
-    <div class="nav-logo"><i class="fas fa-route"></i></div>
-    Mileage Tracker
-  </a>
-  <div class="nav-right">
-    <div class="time-toggle">
-      <button class="time-toggle-btn" id="toggle12h" onclick="setTimeFormat('12h')">12h</button>
-      <button class="time-toggle-btn" id="toggle24h" onclick="setTimeFormat('24h')">24h</button>
-    </div>
-    <div class="user-chip">
-      <div class="user-avatar">{{ username[0]|upper }}</div>
-      {{ username }}
-    </div>
-    <a href="/logout" class="logout-link">Sign Out</a>
-  </div>
-</nav>
+{% set show_time_toggle = true %}
+{% include '_navbar.html' %}
 
 <div class="page">
 
