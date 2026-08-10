@@ -65,12 +65,14 @@
     .vehicle-info { flex: 1; min-width: 0; }
     .vehicle-name { font-weight: 600; font-size: .88rem; color: var(--text); }
     .vehicle-sub-text { font-size: .75rem; color: var(--muted); margin-top: 1px; }
-    .vehicle-del {
+    .vehicle-actions { display: flex; gap: 4px; flex-shrink: 0; }
+    .vehicle-edit, .vehicle-del {
       width: 28px; height: 28px; border-radius: 6px; flex-shrink: 0;
       background: transparent; border: none; color: #CBD5E1;
       cursor: pointer; display: flex; align-items: center; justify-content: center;
       font-size: .75rem; transition: all .2s;
     }
+    .vehicle-edit:hover { background: #EEF2FF; color: var(--primary); }
     .vehicle-del:hover { background: #FEF2F2; color: #EF4444; }
     .btn-add-vehicle {
       padding: 5px 12px; border-radius: 8px; white-space: nowrap;
@@ -163,7 +165,7 @@
       <div class="v-form-error" id="vehicleFormError"></div>
       <div class="v-form-footer">
         <button class="btn-modal-cancel" onclick="hideVehicleForm()">Cancel</button>
-        <button class="btn-modal-save" id="addVehicleBtn" onclick="addVehicle()">Add Vehicle</button>
+        <button class="btn-modal-save" id="addVehicleBtn" onclick="saveVehicle()">Add Vehicle</button>
       </div>
     </div>
 
@@ -177,6 +179,7 @@
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 <script>
 let vehiclesList = [];
+let editingVehicleId = null;
 
 async function loadVehicles() {
   try {
@@ -201,9 +204,14 @@ function renderVehicleList() {
         <div class="vehicle-name">${escHtml(v.name)}</div>
         ${v.sub ? `<div class="vehicle-sub-text">${escHtml(v.sub)}</div>` : ''}
       </div>
-      <button class="vehicle-del" onclick="deleteVehicle(${v.id})" title="Remove vehicle">
-        <i class="fas fa-trash-alt"></i>
-      </button>`;
+      <div class="vehicle-actions">
+        <button class="vehicle-edit" onclick="editVehicle(${v.id})" title="Edit vehicle">
+          <i class="fas fa-pen"></i>
+        </button>
+        <button class="vehicle-del" onclick="deleteVehicle(${v.id})" title="Remove vehicle">
+          <i class="fas fa-trash-alt"></i>
+        </button>
+      </div>`;
     listEl.appendChild(item);
   });
 }
@@ -211,6 +219,13 @@ function renderVehicleList() {
 function toggleVehicleForm() {
   const form = document.getElementById('vehicleAddForm');
   const willShow = !form.classList.contains('show');
+  if (willShow) {
+    editingVehicleId = null;
+    document.getElementById('addVehicleBtn').textContent = 'Add Vehicle';
+    ['vehicleName','vehicleYear','vehicleMake','vehicleModel'].forEach(id => {
+      document.getElementById(id).value = '';
+    });
+  }
   form.classList.toggle('show', willShow);
   if (willShow) document.getElementById('vehicleName').focus();
 }
@@ -223,9 +238,27 @@ function hideVehicleForm() {
   const errEl = document.getElementById('vehicleFormError');
   errEl.textContent = '';
   errEl.classList.remove('show');
+  editingVehicleId = null;
+  document.getElementById('addVehicleBtn').textContent = 'Add Vehicle';
 }
 
-async function addVehicle() {
+function editVehicle(id) {
+  const v = vehiclesList.find(v => v.id === id);
+  if (!v) return;
+  editingVehicleId = id;
+  document.getElementById('vehicleName').value  = v.name  || '';
+  document.getElementById('vehicleYear').value  = v.year  || '';
+  document.getElementById('vehicleMake').value  = v.make  || '';
+  document.getElementById('vehicleModel').value = v.model || '';
+  const errEl = document.getElementById('vehicleFormError');
+  errEl.textContent = '';
+  errEl.classList.remove('show');
+  document.getElementById('addVehicleBtn').textContent = 'Save Changes';
+  document.getElementById('vehicleAddForm').classList.add('show');
+  document.getElementById('vehicleName').focus();
+}
+
+async function saveVehicle() {
   const name  = document.getElementById('vehicleName').value.trim();
   const year  = document.getElementById('vehicleYear').value.trim();
   const make  = document.getElementById('vehicleMake').value.trim();
@@ -240,31 +273,37 @@ async function addVehicle() {
     return;
   }
 
+  const isEdit = editingVehicleId !== null;
   const btn = document.getElementById('addVehicleBtn');
   btn.disabled = true;
-  btn.textContent = 'Adding…';
+  btn.textContent = isEdit ? 'Saving…' : 'Adding…';
   try {
-    const resp = await fetch('/vehicles', {
-      method: 'POST',
+    const resp = await fetch(isEdit ? `/vehicles/${editingVehicleId}` : '/vehicles', {
+      method: isEdit ? 'PATCH' : 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name, year, make, model })
     });
     const data = await resp.json();
     if (!resp.ok) {
-      errEl.textContent = data.error || 'Failed to add vehicle.';
+      errEl.textContent = data.error || `Failed to ${isEdit ? 'save' : 'add'} vehicle.`;
       errEl.classList.add('show');
       return;
     }
-    vehiclesList.push(data);
+    if (isEdit) {
+      const idx = vehiclesList.findIndex(v => v.id === editingVehicleId);
+      if (idx !== -1) vehiclesList[idx] = data;
+    } else {
+      vehiclesList.push(data);
+    }
     vehiclesList.sort((a, b) => a.name.localeCompare(b.name));
     renderVehicleList();
     hideVehicleForm();
   } catch {
-    errEl.textContent = 'Network error. Could not add vehicle.';
+    errEl.textContent = `Network error. Could not ${isEdit ? 'save' : 'add'} vehicle.`;
     errEl.classList.add('show');
   } finally {
     btn.disabled = false;
-    btn.textContent = 'Add Vehicle';
+    btn.textContent = isEdit ? 'Save Changes' : 'Add Vehicle';
   }
 }
 

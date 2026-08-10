@@ -619,6 +619,31 @@ def create_vehicle():
     return jsonify(_vehicle_dict(v)), 201
 
 
+@app.route('/vehicles/<int:vehicle_id>', methods=['PATCH'])
+@login_required
+def update_vehicle(vehicle_id):
+    v = Vehicle.query.filter_by(id=vehicle_id, user_id=current_user.id).first()
+    if not v:
+        return jsonify({'error': 'Vehicle not found.'}), 404
+    data = request.get_json()
+    name = (data.get('name') or '').strip()
+    if not name:
+        return jsonify({'error': 'Vehicle name is required.'}), 400
+    existing = Vehicle.query.filter(
+        Vehicle.user_id == current_user.id,
+        Vehicle.id != vehicle_id,
+        db.func.lower(Vehicle.name) == name.lower()
+    ).first()
+    if existing:
+        return jsonify({'error': f'You already have a vehicle named "{name}".'}), 409
+    v.name  = name
+    v.year  = (data.get('year')  or '').strip() or None
+    v.make  = (data.get('make')  or '').strip() or None
+    v.model = (data.get('model') or '').strip() or None
+    db.session.commit()
+    return jsonify(_vehicle_dict(v))
+
+
 @app.route('/vehicles/<int:vehicle_id>', methods=['DELETE'])
 @login_required
 def delete_vehicle(vehicle_id):
