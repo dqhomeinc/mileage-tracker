@@ -1,17 +1,19 @@
 # Mileage Tracker
 
-**Version 0.0.3**
+**Version 1.0.0**
 
 A web app for logging and tracking driving mileage. Enter a start and end address to calculate the driving distance, save trips to your history, and export your logs.
 
 ## Features
 
 - **Account system** — register, log in, and reset your password via email
+- **Profile page** — view your account info, change your password, edit your username (checked live for availability as you type), and upload a profile photo
 - **Distance calculation** — uses OpenStreetMap (Nominatim + OSRM) to calculate real driving distances between two addresses
 - **Address autocomplete** — type a partial address and select from live suggestions
 - **Voice input** — speak an address into either location field; the app transcribes and resolves it to the closest matching address *(see known issues)*
-- **Vehicle management** — add vehicles with a nickname and year/make/model; select which vehicle was used when logging each trip
+- **Vehicle management** — add, edit, and remove vehicles (nickname, year, make, model) from their own page; select which vehicle was used when logging each trip
 - **Trip date & time** — optionally record the date a trip took place plus start and end times; history shows `–` when times are omitted
+- **Trip time feasibility check** — warns (without blocking) if a trip's logged start/end time gap is implausible for the distance traveled, in either direction
 - **12h / 24h time toggle** — switch between 12-hour and 24-hour time display from the navbar; preference is saved across sessions
 - **Trip history** — all logged trips are saved per account and displayed newest-first
 - **Edit trips** — update start/end location, distance, vehicle, date, and times for any previously logged trip
@@ -22,8 +24,9 @@ A web app for logging and tracking driving mileage. Enter a start and end addres
 
 ## Tech Stack
 
-- **Backend:** Flask, Flask-Login, Flask-SQLAlchemy, Flask-Mail
-- **Database:** PostgreSQL (production) / SQLite (local development)
+- **Backend:** Flask, Flask-Login, Flask-SQLAlchemy
+- **Database:** PostgreSQL via Neon (production) / SQLite (local development)
+- **Email:** Brevo (transactional HTTPS API, used for password reset emails)
 - **Geocoding:** Nominatim (OpenStreetMap)
 - **Routing:** OSRM public API
 - **Frontend:** Bootstrap 5, vanilla JS, Web Speech API
@@ -33,6 +36,12 @@ A web app for logging and tracking driving mileage. Enter a start and end addres
 - **Voice input is not always working** — the Web Speech API is browser-dependent. It works best in Chrome and Edge on desktop. Safari support is inconsistent and Firefox does not support it at all. On some devices, microphone permission prompts may be dismissed silently with no visible error. If voice input appears to do nothing, try typing the address instead.
 
 ## Release Notes
+
+### v1.0.0 — August 10, 2026
+- Added a profile page: view account info, change your password, edit your username (live availability check as you type), and upload/remove a profile photo
+- Added a navbar account dropdown (Profile, Vehicles) shared across all authenticated pages
+- Migrated vehicle management off the dashboard onto its own page, and added the ability to edit an existing vehicle's details (previously add/delete only)
+- Added a trip time feasibility check: warns if a trip's logged start/end time gap is implausibly fast or slow for the distance traveled, based on OSRM's estimated drive time for that route
 
 ### v0.0.3 — August 8, 2026
 - Fixed password reset emails not sending: switched to Brevo's HTTPS email API (the previous Gmail SMTP approach was blocked by the hosting provider)
