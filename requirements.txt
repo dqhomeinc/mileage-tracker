@@ -1,7 +1,11 @@
-Flask==3.0.3
+Flask==3.1.3
 Flask-Login==0.6.3
 Flask-SQLAlchemy==3.1.1
-requests==2.32.3
-python-dotenv==1.0.1
+requests==2.33.0
+python-dotenv==1.2.2
 gunicorn==22.0.0
-pg8000==1.31.1
+pg8000==1.31.5
+# Transitive deps pinned directly to fixed versions (known CVEs in the
+# versions Flask/requests would otherwise resolve to).
+urllib3==2.7.0
+click==8.3.3
