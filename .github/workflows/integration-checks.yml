@@ -1,0 +1,82 @@
+name: Integration Checks
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+jobs:
+  # render_template() only runs at request time, so a plain `import app`
+  # never catches broken Jinja syntax, undefined vars, or bad includes.
+  template-render:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Render all templates
+        run: python .github/scripts/check_templates.py
+
+  # Templates mix Jinja and inline JS in the same <script> tags, so scripts
+  # are rendered through Jinja first, then the resulting JS is syntax-checked
+  # with Node — nothing else in CI touches the app's inline JS at all.
+  js-syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Check inline JS syntax
+        run: python .github/scripts/check_js_syntax.py
+
+  # CI has no DATABASE_URL, so a plain `import app` always falls back to
+  # SQLite and never exercises the pg8000 connection or the Postgres branch
+  # of _migrate_db() — both of which production actually depends on.
+  postgres-integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: testuser
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_DB: testdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Import against real Postgres
+        env:
+          DATABASE_URL: postgresql://testuser:testpass@localhost:5432/testdb
+        run: python -c "import app"
+
+  dependency-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install pip-audit
+        run: pip install pip-audit
+      - name: Audit dependencies for known vulnerabilities
+        run: pip-audit -r requirements.txt
