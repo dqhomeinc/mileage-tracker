@@ -5,7 +5,7 @@ import time
 import requests
 from dotenv import load_dotenv
 from itsdangerous import URLSafeTimedSerializer, SignatureExpired, BadSignature
-from flask import Flask, render_template, request, redirect, url_for, jsonify, flash
+from flask import Flask, render_template, request, redirect, url_for, jsonify, flash, session
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import (
     LoginManager, UserMixin, login_user, logout_user,
@@ -40,6 +40,14 @@ elif _db_url.startswith('postgresql://'):
 _db_url = _db_url.split('?', 1)[0]
 app.config['SQLALCHEMY_DATABASE_URI'] = _db_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+# Neon's free tier autosuspends the compute after a few minutes idle, which
+# leaves stale connections sitting in the pool. pool_pre_ping catches those
+# with a cheap check before use instead of failing mid-query; pool_recycle
+# avoids handing out connections idle long enough to be suspect anyway.
+app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+    'pool_pre_ping': True,
+    'pool_recycle': 280,
+}
 
 # Brevo (HTTPS email API) — Railway blocks outbound SMTP on non-Pro plans,
 # so password reset emails are sent over HTTPS instead of raw SMTP.
@@ -407,9 +415,23 @@ def login():
 
 
 @app.route('/logout')
-@login_required
 def logout():
-    logout_user()
+    # Not @login_required: signing out is a session/cookie operation and
+    # should never fail just because a DB lookup (via current_user, which
+    # logout_user() touches) hits a transient error — e.g. Neon's free tier
+    # autosuspending mid-request. Always end up logged out regardless.
+    try:
+        logout_user()
+    except Exception:
+        # logout_user() itself resolves current_user first, so the same DB
+        # hiccup can throw before its own cleanup runs — which is what would
+        # normally flag the "remember me" cookie for deletion. Without this,
+        # a remembered session would silently re-authenticate on the next
+        # request despite looking signed out.
+        session.clear()
+        resp = redirect(url_for('login'))
+        resp.delete_cookie(app.config.get('REMEMBER_COOKIE_NAME', 'remember_token'))
+        return resp
     return redirect(url_for('login'))
 
 
