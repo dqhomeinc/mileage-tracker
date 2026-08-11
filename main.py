@@ -1,3 +1,4 @@
+import base64
 import os
 import re
 import time
@@ -10,6 +11,7 @@ from flask_login import (
     LoginManager, UserMixin, login_user, logout_user,
     login_required, current_user
 )
+from sqlalchemy.exc import IntegrityError
 from werkzeug.security import generate_password_hash, check_password_hash
 
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -19,6 +21,12 @@ load_dotenv()
 app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-fallback-key')
+
+MAX_PHOTO_BYTES = 2 * 1024 * 1024  # 2MB
+# Reject oversized request bodies at the Werkzeug layer before they're ever
+# buffered into memory, rather than only checking size after a full read().
+# +64KB covers multipart boundary/header overhead around the raw file bytes.
+app.config['MAX_CONTENT_LENGTH'] = MAX_PHOTO_BYTES + 64 * 1024
 
 # Use PostgreSQL (via pg8000, pure-Python driver) when DATABASE_URL is set; SQLite locally.
 # pg8000 needs the +pg8000 dialect prefix and has no system library dependencies.
@@ -52,6 +60,7 @@ class User(UserMixin, db.Model):
     username = db.Column(db.String(80), unique=True, nullable=False)
     email = db.Column(db.String(120), unique=True, nullable=False)
     password_hash = db.Column(db.String(256), nullable=False)
+    photo_data = db.Column(db.Text, nullable=True)
     trips    = db.relationship('Trip', backref='user', lazy=True, cascade='all, delete-orphan')
     vehicles = db.relationship('Vehicle', backref='owner', lazy=True, cascade='all, delete-orphan')
 
@@ -151,6 +160,19 @@ def _migrate_db():
             for col, typ in additions:
                 if col not in existing:
                     conn.execute(db.text(f'ALTER TABLE trip ADD COLUMN {col} {typ}'))
+
+        if dialect == 'sqlite':
+            result = conn.execute(db.text('PRAGMA table_info(user)'))
+            existing_user_cols = {row[1] for row in result}
+        else:
+            result = conn.execute(db.text(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'user'"
+            ))
+            existing_user_cols = {row[0] for row in result}
+        if 'photo_data' not in existing_user_cols:
+            conn.execute(db.text('ALTER TABLE "user" ADD COLUMN photo_data TEXT'))
+
         conn.commit()
 
 
@@ -173,6 +195,18 @@ def validate_password(password):
     if not _PW_SPECIAL.search(password):
         errors.append('one special character (!@#$…)')
     return errors
+
+
+def validate_username(username):
+    if not username:
+        return 'Username is required.'
+    if len(username) > 80:
+        return 'Username must be 80 characters or fewer.'
+    return None
+
+
+def username_taken(username):
+    return User.query.filter_by(username=username).first() is not None
 
 
 # ---------------------------------------------------------------------------
@@ -326,7 +360,11 @@ def register():
         if not username or not email or not password:
             flash('All fields are required.', 'danger')
             return render_template('register.html')
-        if User.query.filter_by(username=username).first():
+        username_err = validate_username(username)
+        if username_err:
+            flash(username_err, 'danger')
+            return render_template('register.html')
+        if username_taken(username):
             flash('That username is already taken.', 'danger')
             return render_template('register.html')
         if User.query.filter_by(email=email).first():
@@ -440,7 +478,7 @@ def reset_password(token):
 @app.route('/')
 @login_required
 def index():
-    return render_template('index.html', username=current_user.username)
+    return render_template('index.html', username=current_user.username, photo_data=current_user.photo_data)
 
 
 @app.route('/calculate', methods=['POST'])
@@ -659,7 +697,7 @@ def delete_vehicle(vehicle_id):
 @app.route('/my-vehicles')
 @login_required
 def vehicles_page():
-    return render_template('vehicles.html', username=current_user.username)
+    return render_template('vehicles.html', username=current_user.username, photo_data=current_user.photo_data)
 
 
 # ---------------------------------------------------------------------------
@@ -669,7 +707,95 @@ def vehicles_page():
 @app.route('/profile')
 @login_required
 def profile():
-    return render_template('profile.html', username=current_user.username, email=current_user.email)
+    return render_template(
+        'profile.html',
+        username=current_user.username,
+        email=current_user.email,
+        photo_data=current_user.photo_data,
+    )
+
+
+@app.route('/profile/check-username')
+@login_required
+def check_username():
+    username = (request.args.get('username') or '').strip()
+    err = validate_username(username)
+    if err:
+        return jsonify({'available': False, 'error': err})
+    if username == current_user.username:
+        return jsonify({'available': True, 'unchanged': True})
+    return jsonify({'available': not username_taken(username)})
+
+
+@app.route('/profile/update-username', methods=['POST'])
+@login_required
+def update_username():
+    data = request.get_json()
+    username = (data.get('username') or '').strip()
+    err = validate_username(username)
+    if err:
+        return jsonify({'error': err}), 400
+    if username != current_user.username:
+        if username_taken(username):
+            return jsonify({'error': 'That username is already taken.'}), 409
+        current_user.username = username
+        try:
+            db.session.commit()
+        except IntegrityError:
+            # Another request claimed this username between our check and commit.
+            db.session.rollback()
+            return jsonify({'error': 'That username is already taken.'}), 409
+    return jsonify({'success': True, 'username': current_user.username})
+
+
+# Signature-sniffed from actual file bytes, not the client-supplied
+# Content-Type header, so a mislabeled non-image file can't pass this check.
+_IMAGE_SIGNATURES = {
+    b'\xff\xd8\xff':          'image/jpeg',
+    b'\x89PNG\r\n\x1a\n':     'image/png',
+    b'GIF87a':                'image/gif',
+    b'GIF89a':                'image/gif',
+}
+
+
+def sniff_image_type(raw):
+    for signature, mimetype in _IMAGE_SIGNATURES.items():
+        if raw.startswith(signature):
+            return mimetype
+    if raw[:4] == b'RIFF' and raw[8:12] == b'WEBP':
+        return 'image/webp'
+    return None
+
+
+@app.errorhandler(413)
+def request_too_large(_e):
+    return jsonify({'error': 'Photo must be smaller than 2MB.'}), 413
+
+
+@app.route('/profile/photo', methods=['POST'])
+@login_required
+def upload_photo():
+    file = request.files.get('photo')
+    if not file or not file.filename:
+        return jsonify({'error': 'No photo provided.'}), 400
+    raw = file.read()
+    if len(raw) > MAX_PHOTO_BYTES:
+        return jsonify({'error': 'Photo must be smaller than 2MB.'}), 400
+    mimetype = sniff_image_type(raw)
+    if not mimetype:
+        return jsonify({'error': 'File does not appear to be a valid JPEG, PNG, WEBP, or GIF image.'}), 400
+    encoded = base64.b64encode(raw).decode('ascii')
+    current_user.photo_data = f'data:{mimetype};base64,{encoded}'
+    db.session.commit()
+    return jsonify({'success': True, 'photo_data': current_user.photo_data})
+
+
+@app.route('/profile/photo', methods=['DELETE'])
+@login_required
+def delete_photo():
+    current_user.photo_data = None
+    db.session.commit()
+    return jsonify({'success': True})
 
 
 @app.route('/profile/change-password', methods=['POST'])

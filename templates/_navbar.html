@@ -31,11 +31,12 @@
   }
   .user-avatar {
     width: 28px; height: 28px; border-radius: 50%;
-    background: rgba(255,255,255,.3);
+    background: rgba(255,255,255,.3); overflow: hidden;
     display: flex; align-items: center; justify-content: center;
     font-size: 0.72rem; font-weight: 700; color: white;
     flex-shrink: 0;
   }
+  .user-avatar img { width: 100%; height: 100%; object-fit: cover; }
   .chip-caret { font-size: 0.6rem; opacity: 0.75; margin-left: 1px; }
   .logout-link {
     color: rgba(255,255,255,.8); font-size: 0.82rem;
@@ -86,8 +87,14 @@
     {% endif %}
     <div class="dropdown">
       <button class="user-chip" type="button" data-bs-toggle="dropdown" aria-expanded="false">
-        <div class="user-avatar">{{ username[0]|upper }}</div>
-        {{ username }}
+        <div class="user-avatar" id="navAvatar">
+          {% if photo_data %}
+            <img src="{{ photo_data }}" alt="">
+          {% else %}
+            {{ username[0]|upper }}
+          {% endif %}
+        </div>
+        <span id="navUsername">{{ username }}</span>
         <i class="fas fa-chevron-down chip-caret"></i>
       </button>
       <ul class="dropdown-menu dropdown-menu-end user-dropdown-menu">

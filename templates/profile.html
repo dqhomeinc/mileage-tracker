@@ -55,14 +55,31 @@
     }
 
     .account-row { display: flex; align-items: center; gap: 14px; margin-bottom: 16px; }
+    .avatar-wrap { position: relative; flex-shrink: 0; }
     .account-avatar {
       width: 48px; height: 48px; border-radius: 50%;
-      background: var(--grad);
+      background: var(--grad); overflow: hidden;
       display: flex; align-items: center; justify-content: center;
       color: white; font-weight: 700; font-size: 1.1rem; flex-shrink: 0;
     }
+    .account-avatar img { width: 100%; height: 100%; object-fit: cover; }
+    .avatar-edit-btn {
+      position: absolute; bottom: -2px; right: -2px;
+      width: 22px; height: 22px; border-radius: 50%;
+      background: var(--primary); color: white;
+      display: flex; align-items: center; justify-content: center;
+      font-size: .65rem; cursor: pointer; border: 2px solid var(--surface);
+      transition: opacity .15s;
+    }
+    .avatar-edit-btn:hover { opacity: .85; }
     .account-name { font-weight: 600; font-size: 0.98rem; color: var(--text); }
     .account-email { font-size: 0.85rem; color: var(--muted); margin-top: 2px; }
+    .link-btn {
+      background: none; border: none; padding: 0; margin-top: 4px;
+      color: var(--muted); font-size: .78rem; cursor: pointer;
+      text-decoration: underline; font-family: 'Inter', sans-serif;
+    }
+    .link-btn:hover { color: #EF4444; }
 
     .field { margin-bottom: 16px; }
     .field label {
@@ -77,6 +94,11 @@
       outline: none; transition: border-color .2s, box-shadow .2s;
     }
     .field input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(79,70,229,.12); }
+    .field input.valid { border-color: #16A34A; }
+    .field input.invalid { border-color: #EF4444; }
+    .field-hint { font-size: .78rem; margin-top: 6px; min-height: 16px; }
+    .field-hint.valid { color: #16A34A; }
+    .field-hint.invalid { color: #EF4444; }
     .pw-wrap { position: relative; }
     .pw-wrap input { padding-right: 42px; }
     .pw-toggle {
@@ -110,15 +132,35 @@
   <div class="panel">
     <div class="panel-heading">
       <div class="panel-heading-icon"><i class="fas fa-user"></i></div>
-      Account
+      Profile
     </div>
     <div class="account-row">
-      <div class="account-avatar">{{ username[0]|upper }}</div>
+      <div class="avatar-wrap">
+        <div class="account-avatar" id="accountAvatar">
+          {% if photo_data %}
+            <img src="{{ photo_data }}" alt="Profile photo" id="avatarImg">
+          {% else %}
+            <span id="avatarInitial">{{ username[0]|upper }}</span>
+          {% endif %}
+        </div>
+        <label class="avatar-edit-btn" for="photoInput" title="Change photo">
+          <i class="fas fa-camera"></i>
+        </label>
+        <input type="file" id="photoInput" accept="image/jpeg,image/png,image/webp,image/gif" style="display:none" onchange="uploadPhoto(this)">
+      </div>
       <div>
-        <div class="account-name">{{ username }}</div>
         <div class="account-email">{{ email }}</div>
+        <button type="button" class="link-btn" id="removePhotoBtn" onclick="removePhoto()" style="{{ 'display:none' if not photo_data }}">Remove photo</button>
       </div>
     </div>
+    <div class="form-msg" id="photoMsg"></div>
+
+    <div class="field">
+      <label for="usernameInput">Username</label>
+      <input type="text" id="usernameInput" value="{{ username }}" oninput="checkUsernameLive()" autocomplete="off">
+      <div class="field-hint" id="usernameHint"></div>
+    </div>
+    <button class="btn-save" id="saveUsernameBtn" onclick="saveUsername()" disabled>Save Username</button>
   </div>
 
   <div class="panel">
@@ -164,6 +206,148 @@
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 <script>
+// ─── Username edit ──────────────────────────────────────────────────────────
+
+let currentUsername = {{ username|tojson }};
+let usernameCheckTimer = null;
+let usernameIsAvailable = false;
+
+function checkUsernameLive() {
+  const input = document.getElementById('usernameInput');
+  const hint  = document.getElementById('usernameHint');
+  const btn   = document.getElementById('saveUsernameBtn');
+  const value = input.value.trim();
+
+  clearTimeout(usernameCheckTimer);
+  input.classList.remove('valid', 'invalid');
+  hint.classList.remove('valid', 'invalid');
+  hint.textContent = '';
+  usernameIsAvailable = false;
+  btn.disabled = true;
+
+  if (!value || value === currentUsername) return;
+
+  usernameCheckTimer = setTimeout(async () => {
+    try {
+      const resp = await fetch(`/profile/check-username?username=${encodeURIComponent(value)}`);
+      const data = await resp.json();
+      if (input.value.trim() !== value) return; // stale response, input changed since
+      if (data.available) {
+        usernameIsAvailable = true;
+        input.classList.add('valid');
+        hint.classList.add('valid');
+        hint.textContent = 'Username is available.';
+        btn.disabled = false;
+      } else {
+        input.classList.add('invalid');
+        hint.classList.add('invalid');
+        hint.textContent = data.error || 'That username is already taken.';
+      }
+    } catch { /* non-fatal, leave unresolved */ }
+  }, 400);
+}
+
+async function saveUsername() {
+  if (!usernameIsAvailable) return;
+  const input = document.getElementById('usernameInput');
+  const hint  = document.getElementById('usernameHint');
+  const btn   = document.getElementById('saveUsernameBtn');
+  const value = input.value.trim();
+
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
+  try {
+    const resp = await fetch('/profile/update-username', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: value })
+    });
+    const data = await resp.json();
+    if (!resp.ok) {
+      hint.classList.remove('valid');
+      hint.classList.add('invalid');
+      hint.textContent = data.error || 'Failed to update username.';
+      input.classList.remove('valid');
+      input.classList.add('invalid');
+      return;
+    }
+    currentUsername = data.username;
+    input.classList.remove('valid', 'invalid');
+    hint.classList.remove('invalid');
+    hint.classList.add('valid');
+    hint.textContent = 'Username updated.';
+    const navUsername = document.getElementById('navUsername');
+    if (navUsername) navUsername.textContent = data.username;
+  } catch {
+    hint.classList.add('invalid');
+    hint.textContent = 'Network error. Could not update username.';
+  } finally {
+    usernameIsAvailable = false;
+    btn.disabled = true;
+    btn.textContent = 'Save Username';
+  }
+}
+
+// ─── Profile photo ──────────────────────────────────────────────────────────
+
+function setAvatarHtml(html) {
+  document.getElementById('accountAvatar').innerHTML = html;
+  const navAvatar = document.getElementById('navAvatar');
+  if (navAvatar) navAvatar.innerHTML = html;
+}
+
+async function uploadPhoto(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const msgEl = document.getElementById('photoMsg');
+  msgEl.classList.remove('show', 'error', 'success');
+
+  if (file.size > 2 * 1024 * 1024) {
+    msgEl.textContent = 'Photo must be smaller than 2MB.';
+    msgEl.classList.add('show', 'error');
+    input.value = '';
+    return;
+  }
+
+  const formData = new FormData();
+  formData.append('photo', file);
+  try {
+    const resp = await fetch('/profile/photo', { method: 'POST', body: formData });
+    const data = await resp.json();
+    if (!resp.ok) {
+      msgEl.textContent = data.error || 'Failed to upload photo.';
+      msgEl.classList.add('show', 'error');
+      return;
+    }
+    setAvatarHtml(`<img src="${data.photo_data}" alt="Profile photo" id="avatarImg">`);
+    document.getElementById('removePhotoBtn').style.display = '';
+  } catch {
+    msgEl.textContent = 'Network error. Could not upload photo.';
+    msgEl.classList.add('show', 'error');
+  } finally {
+    input.value = '';
+  }
+}
+
+async function removePhoto() {
+  if (!confirm('Remove your profile photo?')) return;
+  const msgEl = document.getElementById('photoMsg');
+  msgEl.classList.remove('show', 'error', 'success');
+  try {
+    const resp = await fetch('/profile/photo', { method: 'DELETE' });
+    if (!resp.ok) {
+      msgEl.textContent = 'Failed to remove photo.';
+      msgEl.classList.add('show', 'error');
+      return;
+    }
+    setAvatarHtml(`<span id="avatarInitial">${currentUsername[0].toUpperCase()}</span>`);
+    document.getElementById('removePhotoBtn').style.display = 'none';
+  } catch {
+    msgEl.textContent = 'Network error. Could not remove photo.';
+    msgEl.classList.add('show', 'error');
+  }
+}
+
 function togglePw(btn) {
   const input = btn.parentElement.querySelector('input');
   const icon  = btn.querySelector('i');
