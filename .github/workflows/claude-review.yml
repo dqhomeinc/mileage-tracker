@@ -27,14 +27,23 @@ jobs:
           # tool, so without this the review runs but nothing gets posted.
           track_progress: true
           prompt: |
-            Review this pull request and post a single PR review comment with:
+            Review this pull request and:
 
-            1. **Summary** — 2-3 sentences on what this PR actually changes and why,
-               based on the diff and PR description.
-            2. **Risk assessment** — Low/Medium/High, with a one-line reason (e.g.
-               touches auth, changes deploy config, migrates data, pure UI tweak).
-            3. **Findings** — correctness bugs, security issues, and
-               simplification/reuse opportunities. Only report concrete problems
-               you find in the diff — skip style nits. If there are none, say so.
+            1. Post a single PR review comment with:
+               - **Summary** — 2-3 sentences on what this PR actually changes and why,
+                 based on the diff and PR description.
+               - **Risk assessment** — Low/Medium/High, with a one-line reason (e.g.
+                 touches auth, changes deploy config, migrates data, pure UI tweak).
+               - **Minor notes** — style nits and non-blocking low-severity
+                 observations only (e.g. naming, minor simplification/reuse
+                 opportunities). Do not include correctness bugs, security issues,
+                 or anything medium/high severity here — those go inline instead
+                 (see below). If there are none, say so.
+
+            2. For any HIGH or MEDIUM severity finding (correctness bugs, security
+               issues, data loss, auth bypass, or bugs that would break the app for
+               real users) — post it as an inline comment directly on the relevant
+               line(s) in the diff, not in the summary comment. Low severity issues
+               and style nits go in "Minor notes" above instead, not inline.
 
             Be concise throughout.
