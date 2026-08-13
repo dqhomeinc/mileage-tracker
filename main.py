@@ -406,10 +406,13 @@ def login():
         password = request.form.get('password', '')
         remember = request.form.get('remember') == '1'
         user = User.query.filter_by(email=email).first()
-        if user and user.check_password(password):
+        if not user:
+            flash('No account is associated with that email.', 'danger')
+        elif not user.check_password(password):
+            flash('Incorrect password.', 'danger')
+        else:
             login_user(user, remember=remember)
             return redirect(url_for('index'))
-        flash('Invalid email or password.', 'danger')
 
     return render_template('login.html')
 
