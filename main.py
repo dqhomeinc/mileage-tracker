@@ -359,8 +359,8 @@ def _elapsed_seconds(start_time, end_time):
     return (end_min - start_min) * 60
 
 
-FEASIBILITY_MIN_RATIO = 0.5  # flag "too fast" if elapsed < 50% of OSRM's expected duration
-FEASIBILITY_MAX_RATIO = 3.0  # flag "too slow" if elapsed > 300% of OSRM's expected duration
+FEASIBILITY_MIN_RATIO = 0.5  # flag "too fast" if elapsed < 50% of Geocodio's expected duration
+FEASIBILITY_MAX_RATIO = 3.0  # flag "too slow" if elapsed > 300% of Geocodio's expected duration
 
 
 def check_trip_feasibility(start_time, end_time, distance_miles, duration_seconds):
