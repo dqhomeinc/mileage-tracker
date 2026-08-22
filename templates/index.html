@@ -1145,6 +1145,8 @@ function openEditModal(id) {
     id,
     miles: parseMiles(row.dataset.miles),
     durationSeconds: row.dataset.durationSeconds ? parseInt(row.dataset.durationSeconds, 10) : null,
+    calcStart: row.dataset.start,
+    calcEnd:   row.dataset.end,
   };
   document.getElementById('editStart').value = row.dataset.start;
   document.getElementById('editEnd').value   = row.dataset.end;
@@ -1176,13 +1178,10 @@ document.getElementById('editModal').addEventListener('click', (e) => {
   if (e.target === document.getElementById('editModal')) closeEditModal();
 });
 
-async function recalcEditDistance() {
-  const start = document.getElementById('editStart').value.trim();
-  const end   = document.getElementById('editEnd').value.trim();
-  if (!start || !end) return;
-  const btn = document.getElementById('recalcBtn');
-  btn.disabled = true;
-  btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Calculating…';
+// Calls /calculate for the given start/end and, on success, updates
+// editingTrip's miles/duration (and the locations they're now current
+// for) in place. Returns whether it succeeded; never throws.
+async function fetchEditDistance(start, end) {
   try {
     const resp = await fetch('/calculate', {
       method: 'POST',
@@ -1193,11 +1192,26 @@ async function recalcEditDistance() {
     if (resp.ok) {
       editingTrip.miles = data.distance_miles;
       editingTrip.durationSeconds = data.duration_seconds;
+      editingTrip.calcStart = start;
+      editingTrip.calcEnd   = end;
       document.getElementById('editMiles').textContent = data.distance_miles;
       checkEditSpeedLive();
+      return true;
     }
-  } catch { /* silent */ }
-  finally {
+  } catch { /* fall through to false */ }
+  return false;
+}
+
+async function recalcEditDistance() {
+  const start = document.getElementById('editStart').value.trim();
+  const end   = document.getElementById('editEnd').value.trim();
+  if (!start || !end) return;
+  const btn = document.getElementById('recalcBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Calculating…';
+  try {
+    await fetchEditDistance(start, end);
+  } finally {
     btn.disabled = false;
     btn.innerHTML = '<i class="fas fa-route"></i> Recalculate';
   }
@@ -1209,6 +1223,24 @@ async function saveEdit() {
   const end   = document.getElementById('editEnd').value.trim();
   if (!start || !end) return;
 
+  const btn = document.getElementById('saveEditBtn');
+
+  // The distance in editingTrip is only valid for the locations it was last
+  // calculated for. If the user edited start/end without hitting Recalculate,
+  // it's now stale — recalculate here so a location change is never silently
+  // saved with the old trip's mileage.
+  if (start !== editingTrip.calcStart || end !== editingTrip.calcEnd) {
+    btn.disabled = true;
+    btn.textContent = 'Recalculating…';
+    const ok = await fetchEditDistance(start, end);
+    if (!ok) {
+      alert('Could not recalculate distance for the new location(s). Please check the address and try again.');
+      btn.disabled = false;
+      btn.textContent = 'Save Changes';
+      return;
+    }
+  }
+
   const vehicleVal = document.getElementById('editVehicle').value;
   const payload = {
     start, end, distance_miles: editingTrip.miles,
@@ -1219,7 +1251,6 @@ async function saveEdit() {
     end_time:   getTimeValue('editEndTime'),
   };
 
-  const btn = document.getElementById('saveEditBtn');
   btn.disabled = true;
   btn.textContent = 'Saving…';
   try {
