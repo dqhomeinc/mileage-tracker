@@ -1,7 +1,6 @@
 import base64
 import os
 import re
-import time
 import requests
 from dotenv import load_dotenv
 from itsdangerous import URLSafeTimedSerializer, SignatureExpired, BadSignature
@@ -53,6 +52,7 @@ app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
 # so password reset emails are sent over HTTPS instead of raw SMTP.
 app.config['BREVO_API_KEY'] = os.environ.get('BREVO_API_KEY')
 app.config['BREVO_SENDER_EMAIL'] = os.environ.get('BREVO_SENDER_EMAIL')
+app.config['GEOCODIO_API_KEY'] = os.environ.get('GEOCODIO_API_KEY')
 
 db = SQLAlchemy(app)
 login_manager = LoginManager(app)
@@ -274,43 +274,54 @@ def _mail_config_ok():
 
 
 # ---------------------------------------------------------------------------
-# Distance calculation: Nominatim geocoding + OSRM routing
+# Distance calculation: Geocodio geocoding + driving distance
 # ---------------------------------------------------------------------------
 
-NOMINATIM_URL = 'https://nominatim.openstreetmap.org/search'
-OSRM_URL = 'http://router.project-osrm.org/route/v1/driving'
-HEADERS = {'User-Agent': 'mileage-tracker/1.0 (joseph.jia23@gmail.com)'}
+GEOCODIO_BASE_URL = 'https://api.geocod.io/v2'
+
+
+def _geocodio_headers():
+    return {'Authorization': f'Bearer {app.config["GEOCODIO_API_KEY"]}'}
 
 
 def geocode(address):
     resp = requests.get(
-        NOMINATIM_URL,
-        params={'q': address, 'format': 'json', 'limit': 1},
-        headers=HEADERS,
+        f'{GEOCODIO_BASE_URL}/geocode',
+        params={'q': address, 'limit': 1},
+        headers=_geocodio_headers(),
         timeout=8
     )
+    if resp.status_code == 422:
+        raise ValueError(f'Could not geocode address: "{address}"')
     resp.raise_for_status()
-    results = resp.json()
+    results = resp.json().get('results')
     if not results:
         raise ValueError(f'Could not geocode address: "{address}"')
-    return float(results[0]['lat']), float(results[0]['lon'])
+    location = results[0]['location']
+    return location['lat'], location['lng']
 
 
 def calculate_driving_miles(start_text, end_text):
     start_lat, start_lon = geocode(start_text)
-    time.sleep(1)  # Nominatim rate limit: 1 req/s
     end_lat, end_lon = geocode(end_text)
 
-    url = f'{OSRM_URL}/{start_lon},{start_lat};{end_lon},{end_lat}'
-    resp = requests.get(url, params={'overview': 'false'}, timeout=10)
+    resp = requests.get(
+        f'{GEOCODIO_BASE_URL}/distance',
+        params={
+            'origin': f'{start_lat},{start_lon}',
+            'destinations[]': f'{end_lat},{end_lon}',
+            'mode': 'driving',
+            'units': 'miles',
+        },
+        headers=_geocodio_headers(),
+        timeout=10
+    )
     resp.raise_for_status()
-    data = resp.json()
-    if data.get('code') != 'Ok' or not data.get('routes'):
-        raise ValueError('OSRM could not find a driving route between those locations.')
-    route = data['routes'][0]
-    miles = round(route['distance'] / 1609.344, 2)
-    duration_seconds = round(route['duration'])
-    return miles, duration_seconds
+    destinations = resp.json().get('destinations')
+    if not destinations:
+        raise ValueError('Geocodio could not find a driving route between those locations.')
+    dest = destinations[0]
+    return round(dest['distance_miles'], 2), dest['duration_seconds']
 
 
 def _elapsed_seconds(start_time, end_time):
