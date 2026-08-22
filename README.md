@@ -1,6 +1,6 @@
 # Mileage Tracker
 
-**Version 1.0.0**
+**Version 1.0.1**
 
 A web app for logging and tracking driving mileage. Enter a start and end address to calculate the driving distance, save trips to your history, and export your logs.
 
@@ -8,7 +8,7 @@ A web app for logging and tracking driving mileage. Enter a start and end addres
 
 - **Account system** — register, log in, and reset your password via email
 - **Profile page** — view your account info, change your password, edit your username (checked live for availability as you type), and upload a profile photo
-- **Distance calculation** — uses OpenStreetMap (Nominatim + OSRM) to calculate real driving distances between two addresses
+- **Distance calculation** — uses Geocodio to calculate real driving distances between two addresses; if a distance can't be calculated (e.g. an unresolvable address), the trip is still logged with the distance marked pending and can be recalculated later from the edit screen
 - **Address autocomplete** — type a partial address and select from live suggestions
 - **Voice input** — speak an address into either location field; the app transcribes and resolves it to the closest matching address *(see known issues)*
 - **Vehicle management** — add, edit, and remove vehicles (nickname, year, make, model) from their own page; select which vehicle was used when logging each trip
@@ -27,8 +27,7 @@ A web app for logging and tracking driving mileage. Enter a start and end addres
 - **Backend:** Flask, Flask-Login, Flask-SQLAlchemy
 - **Database:** PostgreSQL via Neon (production) / SQLite (local development)
 - **Email:** Brevo (transactional HTTPS API, used for password reset emails)
-- **Geocoding:** Nominatim (OpenStreetMap)
-- **Routing:** OSRM public API
+- **Geocoding & routing:** Geocodio
 - **Frontend:** Bootstrap 5, vanilla JS, Web Speech API
 
 ## Known Issues
@@ -36,6 +35,13 @@ A web app for logging and tracking driving mileage. Enter a start and end addres
 - **Voice input is not always working** — the Web Speech API is browser-dependent. It works best in Chrome and Edge on desktop. Safari support is inconsistent and Firefox does not support it at all. On some devices, microphone permission prompts may be dismissed silently with no visible error. If voice input appears to do nothing, try typing the address instead.
 
 ## Release Notes
+
+### v1.0.1 — August 22, 2026
+- Migrated distance calculation from Nominatim/OSRM to Geocodio
+- Logging a trip no longer requires a successful distance calculation — if the distance can't be calculated (e.g. an unresolvable address), the trip still saves with its distance marked pending, and it's excluded from mileage totals/exports until resolved
+- Editing a trip now automatically recalculates its distance on save if the start or end location was changed, even without clicking "Recalculate" — previously an edited location could be saved with the old, now-mismatched distance
+- Login now shows more specific error messages, distinguishing an unrecognized email from an incorrect password (previously a single generic "invalid email or password" message)
+- Fixed an issue where signing out could fail during a transient database hiccup and leave a stale "remember me" session behind
 
 ### v1.0.0 — August 10, 2026
 - Added a profile page: view account info, change your password, edit your username (live availability check as you type), and upload/remove a profile photo
