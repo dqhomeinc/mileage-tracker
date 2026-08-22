@@ -94,7 +94,7 @@ class Trip(db.Model):
     user_id        = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     start_location = db.Column(db.Text, nullable=False)
     end_location   = db.Column(db.Text, nullable=False)
-    distance_miles = db.Column(db.Float, nullable=False)
+    distance_miles = db.Column(db.Float, nullable=True)
     timestamp      = db.Column(db.DateTime, server_default=db.func.now())
     vehicle_id     = db.Column(db.Integer, db.ForeignKey('vehicle.id'), nullable=True)
     trip_date      = db.Column(db.String(10), nullable=True)
@@ -136,12 +136,21 @@ def _trip_dict(trip, vehicle_name=None, vehicle_sub=None):
 
 
 def _migrate_db():
-    """Add new columns/tables to existing databases without dropping data."""
+    """Add new columns/tables to existing databases without dropping data.
+
+    Note: distance_miles was relaxed to nullable so a trip can be logged even
+    when distance calculation fails. Postgres can drop the NOT NULL
+    constraint in place; SQLite cannot (ALTER COLUMN isn't supported), so the
+    SQLite branch only warns — local dev DBs hold no real data and can just
+    be deleted so db.create_all() recreates the table from the model.
+    """
     dialect = db.engine.dialect.name
     with db.engine.connect() as conn:
         if dialect == 'sqlite':
             result = conn.execute(db.text('PRAGMA table_info(trip)'))
-            existing = {row[1] for row in result}
+            info = list(result)
+            existing = {row[1] for row in info}
+            notnull = {row[1]: row[3] for row in info}
             additions = [
                 ('vehicle_id', 'INTEGER'),
                 ('trip_date',  'VARCHAR(10)'),
@@ -152,12 +161,20 @@ def _migrate_db():
             for col, typ in additions:
                 if col not in existing:
                     conn.execute(db.text(f'ALTER TABLE trip ADD COLUMN {col} {typ}'))
+            if notnull.get('distance_miles') == 1:
+                app.logger.warning(
+                    "Local SQLite 'trip' table still enforces distance_miles NOT NULL "
+                    "(SQLite can't drop that constraint via ALTER TABLE). Delete "
+                    "mileage.db and restart — db.create_all() will recreate it from "
+                    "the updated model. Safe for local dev; it holds no production data."
+                )
         else:
             result = conn.execute(db.text(
-                "SELECT column_name FROM information_schema.columns "
+                "SELECT column_name, is_nullable FROM information_schema.columns "
                 "WHERE table_name = 'trip'"
             ))
-            existing = {row[0] for row in result}
+            columns = {row[0]: row[1] for row in result}
+            existing = set(columns)
             additions = [
                 ('vehicle_id', 'INTEGER'),
                 ('trip_date',  'VARCHAR(10)'),
@@ -168,6 +185,8 @@ def _migrate_db():
             for col, typ in additions:
                 if col not in existing:
                     conn.execute(db.text(f'ALTER TABLE trip ADD COLUMN {col} {typ}'))
+            if columns.get('distance_miles') == 'NO':
+                conn.execute(db.text('ALTER TABLE trip ALTER COLUMN distance_miles DROP NOT NULL'))
 
         if dialect == 'sqlite':
             result = conn.execute(db.text('PRAGMA table_info(user)'))
@@ -532,11 +551,23 @@ def calculate():
 @login_required
 def log_trip():
     data = request.get_json()
-    start          = (data.get('start') or '').strip()
-    end            = (data.get('end')   or '').strip()
-    distance_miles = data.get('distance_miles')
-    if not start or not end or distance_miles is None:
+    start = (data.get('start') or '').strip()
+    end   = (data.get('end')   or '').strip()
+    if not start or not end:
         return jsonify({'error': 'Missing trip data.'}), 400
+
+    distance_miles   = data.get('distance_miles')
+    duration_seconds = data.get('duration_seconds')
+    distance_error   = None
+    if distance_miles is not None:
+        distance_miles = float(distance_miles)
+    else:
+        try:
+            distance_miles, duration_seconds = calculate_driving_miles(start, end)
+        except ValueError as e:
+            distance_error = str(e)
+        except Exception:
+            distance_error = 'Could not calculate distance automatically. Edit this trip to add it later.'
 
     vehicle_id  = data.get('vehicle_id') or None
     trip_date   = (data.get('trip_date')   or '').strip() or None
@@ -552,24 +583,28 @@ def log_trip():
         else:
             vehicle_id = None
 
-    warning = check_trip_feasibility(start_time, end_time, float(distance_miles), data.get('duration_seconds'))
+    warning = None
+    if distance_miles is not None:
+        warning = check_trip_feasibility(start_time, end_time, distance_miles, duration_seconds)
 
     trip = Trip(
         user_id=current_user.id,
         start_location=start,
         end_location=end,
-        distance_miles=float(distance_miles),
+        distance_miles=distance_miles,
         vehicle_id=vehicle_id,
         trip_date=trip_date,
         start_time=start_time,
         end_time=end_time,
-        duration_seconds=data.get('duration_seconds'),
+        duration_seconds=duration_seconds,
     )
     db.session.add(trip)
     db.session.commit()
     resp = {'success': True, 'trip': _trip_dict(trip, vehicle_name, vehicle_sub)}
     if warning:
         resp['warning'] = warning
+    if distance_error:
+        resp['distance_error'] = distance_error
     return jsonify(resp)
 
 
@@ -598,8 +633,9 @@ def update_trip(trip_id):
     start          = (data.get('start') or '').strip()
     end            = (data.get('end')   or '').strip()
     distance_miles = data.get('distance_miles')
-    if not start or not end or distance_miles is None:
+    if not start or not end:
         return jsonify({'error': 'Missing fields.'}), 400
+    distance_miles = float(distance_miles) if distance_miles is not None else None
 
     vehicle_id  = data.get('vehicle_id') or None
     trip_date   = (data.get('trip_date')   or '').strip() or None
@@ -618,11 +654,13 @@ def update_trip(trip_id):
     # Fall back to the trip's already-stored duration when the client didn't
     # send a fresh one (i.e. the route wasn't recalculated this edit).
     duration_seconds = data.get('duration_seconds') or trip.duration_seconds
-    warning = check_trip_feasibility(start_time, end_time, float(distance_miles), duration_seconds)
+    warning = None
+    if distance_miles is not None:
+        warning = check_trip_feasibility(start_time, end_time, distance_miles, duration_seconds)
 
     trip.start_location = start
     trip.end_location   = end
-    trip.distance_miles = float(distance_miles)
+    trip.distance_miles = distance_miles
     trip.vehicle_id     = vehicle_id
     trip.trip_date      = trip_date
     trip.start_time     = start_time
