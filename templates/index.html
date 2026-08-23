@@ -1376,6 +1376,25 @@ function groupTripsByYear(trips) {
   return years.map(year => ({ year, trips: groups.get(year) }));
 }
 
+// Per-vehicle trip count/miles for one year's trips, sorted by miles
+// descending. Trips with no vehicle assigned are bucketed under "No
+// vehicle". Returns [] if nobody used a vehicle that year — nothing
+// useful to break down.
+function vehicleSummary(trips) {
+  if (!trips.some(t => t.vehicle_name)) return [];
+  const map = new Map();
+  trips.forEach(t => {
+    const name = t.vehicle_name || 'No vehicle';
+    if (!map.has(name)) map.set(name, { trips: 0, miles: 0 });
+    const entry = map.get(name);
+    entry.trips += 1;
+    entry.miles += t.miles ?? 0;
+  });
+  return [...map.entries()]
+    .map(([name, v]) => ({ name, ...v }))
+    .sort((a, b) => b.miles - a.miles);
+}
+
 function exportPDF() {
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF({ orientation: 'landscape' });
@@ -1407,8 +1426,30 @@ function exportPDF() {
       14, headingY + 6
     );
 
+    let tableStartY = headingY + 11;
+    const vehicleRows = vehicleSummary(group.trips);
+    if (vehicleRows.length) {
+      doc.setFontSize(8);
+      doc.setTextColor(30, 41, 59);
+      doc.text('By Vehicle', 14, tableStartY);
+      tableStartY += 3;
+
+      doc.autoTable({
+        startY: tableStartY,
+        head: [['Vehicle', 'Trips', 'Miles']],
+        body: vehicleRows.map(v => [v.name, v.trips, Math.round(v.miles * 100) / 100]),
+        theme: 'plain',
+        styles: { fontSize: 7, cellPadding: 1 },
+        headStyles: { fontStyle: 'bold', textColor: [100, 116, 139] },
+        columnStyles: { 1: { halign: 'right' }, 2: { halign: 'right' } },
+        tableWidth: 90,
+        margin: { left: 14, right: 14 },
+      });
+      tableStartY = doc.lastAutoTable.finalY + 6;
+    }
+
     doc.autoTable({
-      startY: headingY + 11,
+      startY: tableStartY,
       head: [['Start Location', 'End Location', 'Miles', 'Vehicle', 'Trip Date', 'Start Time', 'End Time']],
       body: group.trips.map(t => [
         t.start, t.end, t.miles ?? '',
