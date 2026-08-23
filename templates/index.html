@@ -1352,9 +1352,34 @@ function exportExcel() {
   XLSX.writeFile(wb, 'mileage-log.xlsx');
 }
 
+// Trips are grouped by year for the PDF export (one page per year). A trip's
+// year comes from its trip_date when set, else the year embedded in its
+// "MMM DD, YYYY h:mm AM/PM" logged-at timestamp string.
+function tripYear(t) {
+  if (t.trip_date) return t.trip_date.slice(0, 4);
+  const m = (t.timestamp || '').match(/,\s*(\d{4})/);
+  return m ? m[1] : 'Unknown';
+}
+
+function groupTripsByYear(trips) {
+  const groups = new Map();
+  trips.forEach(t => {
+    const year = tripYear(t);
+    if (!groups.has(year)) groups.set(year, []);
+    groups.get(year).push(t);
+  });
+  const years = [...groups.keys()].sort((a, b) => {
+    if (a === 'Unknown') return 1;
+    if (b === 'Unknown') return -1;
+    return b - a;
+  });
+  return years.map(year => ({ year, trips: groups.get(year) }));
+}
+
 function exportPDF() {
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF({ orientation: 'landscape' });
+  const yearGroups = groupTripsByYear(tripsData);
 
   doc.setFontSize(16);
   doc.setTextColor(79, 70, 229);
@@ -1364,23 +1389,42 @@ function exportPDF() {
   doc.setTextColor(100, 116, 139);
   doc.text(`Exported on ${new Date().toLocaleDateString()}  ·  ${tripCount} trips  ·  ${(Math.round(totalMilesAccum * 100) / 100).toLocaleString()} mi total`, 14, 25);
 
-  doc.autoTable({
-    startY: 30,
-    head: [['Start Location', 'End Location', 'Miles', 'Vehicle', 'Trip Date', 'Start Time', 'End Time']],
-    body: tripsData.map(t => [
-      t.start, t.end, t.miles ?? '',
-      t.vehicle_name || '',
-      t.trip_date    || '',
-      t.start_time   || '',
-      t.end_time     || ''
-    ]),
-    foot: [['', 'Total', Math.round(totalMilesAccum * 100) / 100, '', '', '', '']],
-    headStyles:  { fillColor: [79, 70, 229], fontSize: 7, fontStyle: 'bold' },
-    footStyles:  { fillColor: [238, 242, 255], textColor: [79, 70, 229], fontStyle: 'bold', fontSize: 7 },
-    bodyStyles:  { fontSize: 7 },
-    columnStyles: { 2: { halign: 'right' } },
-    alternateRowStyles: { fillColor: [248, 250, 252] },
-    margin: { left: 14, right: 14 },
+  yearGroups.forEach((group, i) => {
+    const headingY = i === 0 ? 32 : 20;
+    if (i > 0) doc.addPage();
+
+    const yearMiles = group.trips.reduce((sum, t) => sum + (t.miles ?? 0), 0);
+    const yearLabel = group.year === 'Unknown' ? 'Unknown Year' : group.year;
+
+    doc.setFontSize(13);
+    doc.setTextColor(30, 41, 59);
+    doc.text(yearLabel, 14, headingY);
+
+    doc.setFontSize(9);
+    doc.setTextColor(100, 116, 139);
+    doc.text(
+      `${group.trips.length} trip${group.trips.length === 1 ? '' : 's'}  ·  ${(Math.round(yearMiles * 100) / 100).toLocaleString()} mi total`,
+      14, headingY + 6
+    );
+
+    doc.autoTable({
+      startY: headingY + 11,
+      head: [['Start Location', 'End Location', 'Miles', 'Vehicle', 'Trip Date', 'Start Time', 'End Time']],
+      body: group.trips.map(t => [
+        t.start, t.end, t.miles ?? '',
+        t.vehicle_name || '',
+        t.trip_date    || '',
+        t.start_time   || '',
+        t.end_time     || ''
+      ]),
+      foot: [['', 'Total', Math.round(yearMiles * 100) / 100, '', '', '', '']],
+      headStyles:  { fillColor: [79, 70, 229], fontSize: 7, fontStyle: 'bold' },
+      footStyles:  { fillColor: [238, 242, 255], textColor: [79, 70, 229], fontStyle: 'bold', fontSize: 7 },
+      bodyStyles:  { fontSize: 7 },
+      columnStyles: { 2: { halign: 'right' } },
+      alternateRowStyles: { fillColor: [248, 250, 252] },
+      margin: { left: 14, right: 14 },
+    });
   });
 
   doc.save('mileage-log.pdf');
