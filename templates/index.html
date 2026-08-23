@@ -416,7 +416,7 @@
       <div style="margin-bottom:12px">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
           <label class="field-label" for="tripVehicle" style="margin-bottom:0">Vehicle</label>
-          <a href="/my-vehicles" class="vehicle-add-link" target="_blank" rel="noopener">+ Add</a>
+          <a href="/my-vehicles" class="vehicle-add-link">+ Add</a>
         </div>
         <select id="tripVehicle" class="form-input vehicle-select">
           <option value="">— No vehicle (optional) —</option>
@@ -638,6 +638,50 @@ function vehicleHintChange(selectId, hintId) {
   const hint = document.getElementById(hintId);
   const opt  = sel.options[sel.selectedIndex];
   hint.textContent = opt?.dataset.sub || '';
+}
+
+
+// ─── Trip form draft ──────────────────────────────────────────────────────
+// Navigating to /my-vehicles (e.g. the "+ Add" link, or the navbar's
+// Vehicles item) can replace this page in place rather than opening a new
+// tab — notably when installed as a standalone PWA, where target="_blank"
+// has no tab strip to open into. Snapshot the in-progress trip form before
+// leaving and restore it if/when the user comes back to this page.
+const TRIP_DRAFT_KEY = 'tripFormDraft';
+
+function saveTripDraft() {
+  sessionStorage.setItem(TRIP_DRAFT_KEY, JSON.stringify({
+    start:     document.getElementById('start').value,
+    end:       document.getElementById('end').value,
+    vehicleId: document.getElementById('tripVehicle').value,
+    tripDate:  document.getElementById('tripDate').value,
+    startTime: document.getElementById('tripStartTime').value,
+    endTime:   document.getElementById('tripEndTime').value,
+  }));
+}
+window.addEventListener('pagehide', saveTripDraft);
+
+function restoreTripDraft() {
+  const raw = sessionStorage.getItem(TRIP_DRAFT_KEY);
+  if (!raw) return;
+  sessionStorage.removeItem(TRIP_DRAFT_KEY);
+
+  let draft;
+  try { draft = JSON.parse(raw); } catch { return; }
+
+  if (draft.start) document.getElementById('start').value = draft.start;
+  if (draft.end)   document.getElementById('end').value   = draft.end;
+  if (draft.vehicleId) {
+    document.getElementById('tripVehicle').value = draft.vehicleId;
+    vehicleHintChange('tripVehicle', 'tripVehicleHint');
+  }
+  if (draft.tripDate) document.getElementById('tripDate').value = draft.tripDate;
+  [['tripStartTime', draft.startTime], ['tripEndTime', draft.endTime]].forEach(([id, val]) => {
+    if (!val) return;
+    const el = document.getElementById(id);
+    el.value = val;
+    el._userSet = true;
+  });
 }
 
 
@@ -1310,7 +1354,7 @@ async function saveEdit() {
 setupAutocomplete('editStart', 'editStartDropdown');
 setupAutocomplete('editEnd',   'editEndDropdown');
 
-loadVehicles();
+loadVehicles().then(restoreTripDraft);
 loadHistory();
 
 
