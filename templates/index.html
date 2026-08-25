@@ -1360,26 +1360,27 @@ loadHistory();
 
 // ─── Export ───────────────────────────────────────────────────────────────
 
-function exportCSV() {
-  const rows = [['Start Location', 'End Location', 'Miles', 'Vehicle', 'Trip Date', 'Start Time', 'End Time', 'Logged At']];
-  tripsData.forEach(t => rows.push([
-    t.start, t.end, t.miles,
-    t.vehicle_name || '',
-    t.trip_date    || '',
-    t.start_time   || '',
-    t.end_time     || '',
-    t.timestamp
-  ]));
-  rows.push(['', 'TOTAL', (Math.round(totalMilesAccum * 100) / 100), '', '', '', '', '']);
-  const csv = rows.map(r =>
-    r.map(c => `"${String(c ?? '').replace(/"/g, '""')}"`).join(',')
-  ).join('\r\n');
-  triggerDownload('mileage-log.csv', 'text/csv;charset=utf-8;', csv);
-}
+// Shared by CSV/Excel/PDF: the row block for one year's trips — a heading,
+// the "By Vehicle" breakdown (if any), the trip table, and its total row.
+function yearRowBlock(group) {
+  const yearMiles = group.trips.reduce((sum, t) => sum + (t.miles ?? 0), 0);
+  const yearLabel = group.year === 'Unknown' ? 'Unknown Year' : group.year;
+  const rows = [
+    [yearLabel],
+    [`${group.trips.length} trip${group.trips.length === 1 ? '' : 's'}`, `${Math.round(yearMiles * 100) / 100} mi total`],
+    [],
+  ];
 
-function exportExcel() {
-  const rows = [['Start Location', 'End Location', 'Miles', 'Vehicle', 'Trip Date', 'Start Time', 'End Time', 'Logged At']];
-  tripsData.forEach(t => rows.push([
+  const vehicleRows = vehicleSummary(group.trips);
+  if (vehicleRows.length) {
+    rows.push(['By Vehicle']);
+    rows.push(['Vehicle', 'Trips', 'Miles']);
+    vehicleRows.forEach(v => rows.push([v.name, v.trips, Math.round(v.miles * 100) / 100]));
+    rows.push([]);
+  }
+
+  rows.push(['Start Location', 'End Location', 'Miles', 'Vehicle', 'Trip Date', 'Start Time', 'End Time', 'Logged At']);
+  group.trips.forEach(t => rows.push([
     t.start, t.end, t.miles ?? '',
     t.vehicle_name || '',
     t.trip_date    || '',
@@ -1387,12 +1388,45 @@ function exportExcel() {
     t.end_time     || '',
     t.timestamp
   ]));
-  rows.push(['', 'TOTAL', Math.round(totalMilesAccum * 100) / 100, '', '', '', '', '']);
+  rows.push(['', 'TOTAL', Math.round(yearMiles * 100) / 100, '', '', '', '', '']);
+  return rows;
+}
 
+function exportCSV() {
+  const yearGroups = groupTripsByYear(tripsData);
+  const rows = [
+    [`Exported on ${new Date().toLocaleDateString()}`, `${tripCount} trips`, `${Math.round(totalMilesAccum * 100) / 100} mi total`],
+    [],
+  ];
+  yearGroups.forEach(group => {
+    rows.push(...yearRowBlock(group));
+    rows.push([]);
+  });
+
+  const csv = rows.map(r =>
+    r.map(c => `"${String(c ?? '').replace(/"/g, '""')}"`).join(',')
+  ).join('\r\n');
+  triggerDownload('mileage-log.csv', 'text/csv;charset=utf-8;', csv);
+}
+
+function exportExcel() {
+  const yearGroups = groupTripsByYear(tripsData);
   const wb = XLSX.utils.book_new();
-  const ws = XLSX.utils.aoa_to_sheet(rows);
-  ws['!cols'] = [{ wch: 34 }, { wch: 34 }, { wch: 8 }, { wch: 18 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 22 }];
-  XLSX.utils.book_append_sheet(wb, ws, 'Mileage Log');
+
+  yearGroups.forEach((group, i) => {
+    const rows = [];
+    if (i === 0) {
+      rows.push([`Exported on ${new Date().toLocaleDateString()}`, `${tripCount} trips`, `${Math.round(totalMilesAccum * 100) / 100} mi total`]);
+      rows.push([]);
+    }
+    rows.push(...yearRowBlock(group));
+
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    ws['!cols'] = [{ wch: 34 }, { wch: 34 }, { wch: 8 }, { wch: 18 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 22 }];
+    const sheetName = group.year === 'Unknown' ? 'Unknown Year' : group.year;
+    XLSX.utils.book_append_sheet(wb, ws, sheetName);
+  });
+
   XLSX.writeFile(wb, 'mileage-log.xlsx');
 }
 
