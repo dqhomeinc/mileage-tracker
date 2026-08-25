@@ -1360,6 +1360,14 @@ loadHistory();
 
 // ─── Export ───────────────────────────────────────────────────────────────
 
+const round2 = n => Math.round(n * 100) / 100;
+
+// The "Exported on ... · N trips · X mi total" summary row shared by the
+// CSV file and the first sheet of the Excel workbook.
+function exportHeaderRow() {
+  return [`Exported on ${new Date().toLocaleDateString()}`, `${tripCount} trips`, `${round2(totalMilesAccum)} mi total`];
+}
+
 // Shared by CSV/Excel/PDF: the row block for one year's trips — a heading,
 // the "By Vehicle" breakdown (if any), the trip table, and its total row.
 function yearRowBlock(group) {
@@ -1367,7 +1375,7 @@ function yearRowBlock(group) {
   const yearLabel = group.year === 'Unknown' ? 'Unknown Year' : group.year;
   const rows = [
     [yearLabel],
-    [`${group.trips.length} trip${group.trips.length === 1 ? '' : 's'}`, `${Math.round(yearMiles * 100) / 100} mi total`],
+    [`${group.trips.length} trip${group.trips.length === 1 ? '' : 's'}`, `${round2(yearMiles)} mi total`],
     [],
   ];
 
@@ -1375,7 +1383,7 @@ function yearRowBlock(group) {
   if (vehicleRows.length) {
     rows.push(['By Vehicle']);
     rows.push(['Vehicle', 'Trips', 'Miles']);
-    vehicleRows.forEach(v => rows.push([v.name, v.trips, Math.round(v.miles * 100) / 100]));
+    vehicleRows.forEach(v => rows.push([v.name, v.trips, round2(v.miles)]));
     rows.push([]);
   }
 
@@ -1388,16 +1396,13 @@ function yearRowBlock(group) {
     t.end_time     || '',
     t.timestamp
   ]));
-  rows.push(['', 'TOTAL', Math.round(yearMiles * 100) / 100, '', '', '', '', '']);
+  rows.push(['', 'TOTAL', round2(yearMiles), '', '', '', '', '']);
   return rows;
 }
 
 function exportCSV() {
   const yearGroups = groupTripsByYear(tripsData);
-  const rows = [
-    [`Exported on ${new Date().toLocaleDateString()}`, `${tripCount} trips`, `${Math.round(totalMilesAccum * 100) / 100} mi total`],
-    [],
-  ];
+  const rows = [exportHeaderRow(), []];
   yearGroups.forEach(group => {
     rows.push(...yearRowBlock(group));
     rows.push([]);
@@ -1416,7 +1421,7 @@ function exportExcel() {
   yearGroups.forEach((group, i) => {
     const rows = [];
     if (i === 0) {
-      rows.push([`Exported on ${new Date().toLocaleDateString()}`, `${tripCount} trips`, `${Math.round(totalMilesAccum * 100) / 100} mi total`]);
+      rows.push(exportHeaderRow());
       rows.push([]);
     }
     rows.push(...yearRowBlock(group));
