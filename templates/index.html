@@ -902,6 +902,40 @@ initTimeInput('tripEndTime');
 initTimeInput('editStartTime');
 initTimeInput('editEndTime');
 
+// Chrome's native date input lets the year segment keep accepting digits
+// past 4 (e.g. typing "202500"), because the WHATWG date-string grammar
+// technically allows a 4-or-more-digit year — so .value legitimately
+// reports "202500-01-01" instead of being rejected as invalid. Truncate
+// the year back to 4 digits so the field can't be left showing something
+// like "01/01/202500". Month/day segments already cap at 2 digits on
+// their own (typing a 3rd digit there just invalidates the value).
+//
+// The native control's internal segment-editing buffer doesn't reliably
+// line up with 'input'/'change' while a multi-digit year is still being
+// typed, so rather than depend on exactly when those fire, poll .value on
+// every animation frame while the field has focus and correct it the
+// instant it overflows — independent of which DOM event (if any) fires.
+function fixOverflowedYear(el) {
+  const val = el.value;
+  if (!val) return;
+  const [y, m, d] = val.split('-');
+  if (y && y.length > 4) el.value = `${y.slice(0, 4)}-${m}-${d}`;
+}
+
+function guardDateInput(id) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  let rafId = null;
+  const tick = () => { fixOverflowedYear(el); rafId = requestAnimationFrame(tick); };
+  el.addEventListener('focus', () => { if (rafId === null) rafId = requestAnimationFrame(tick); });
+  el.addEventListener('blur', () => {
+    if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
+    fixOverflowedYear(el);
+  });
+}
+guardDateInput('tripDate');
+guardDateInput('editTripDate');
+
 
 // ─── Trip time feasibility check ───────────────────────────────────────────
 
