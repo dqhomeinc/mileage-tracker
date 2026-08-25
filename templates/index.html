@@ -1020,9 +1020,7 @@ document.getElementById('logTripBtn').addEventListener('click', async () => {
     const data = await resp.json();
     if (!resp.ok) { showError(data.error || 'Failed to log trip.'); return; }
 
-    tripsData.unshift(data.trip);
-    prependTripRow(data.trip);
-    updateTotal(data.trip.miles, true);
+    await loadHistory();
 
     document.getElementById('start').value = '';
     document.getElementById('end').value   = '';
@@ -1068,13 +1066,31 @@ async function loadHistory() {
   try {
     const resp  = await fetch('/history');
     const trips = await resp.json();
-    if (!trips.length) return;
 
-    document.getElementById('emptyState')?.remove();
+    // Re-render-safe: called both on initial page load and after logging/
+    // editing a trip (so the list re-sorts by trip date), so it must clear
+    // whatever it rendered last time before rebuilding.
+    const wrap = document.getElementById('historyWrap');
+    wrap.querySelectorAll('.trip-row, #tripsHeader').forEach(el => el.remove());
+    headerInserted = false;
+
     totalMilesAccum = 0;
     tripCount = trips.length;
     tripsData = [...trips];
-    trips.forEach(t => { prependTripRow(t, false); totalMilesAccum += t.miles; });
+
+    if (!trips.length) {
+      wrap.innerHTML = `
+        <div class="history-empty" id="emptyState">
+          <span class="empty-icon"><i class="fas fa-route"></i></span>
+          No trips logged yet. Calculate your first trip above!
+        </div>
+      `;
+      updateTotalDisplay();
+      return;
+    }
+
+    document.getElementById('emptyState')?.remove();
+    trips.forEach(t => { prependTripRow(t, false); totalMilesAccum += t.miles ?? 0; });
     updateTotalDisplay();
   } catch { /* non-fatal */ }
 }
@@ -1340,45 +1356,10 @@ async function saveEdit() {
     const data = await resp.json();
     if (!resp.ok) { alert(data.error || 'Failed to save.'); return; }
 
-    const row = document.getElementById(`trip-${data.id}`);
-    const oldMiles = parseMiles(row.dataset.miles);
-    row.classList.toggle('trip-row-pending', data.miles == null);
-    row.dataset.start       = data.start;
-    row.dataset.end         = data.end;
-    row.dataset.miles       = data.miles ?? '';
-    row.dataset.vehicleId   = data.vehicle_id   || '';
-    row.dataset.vehicleName = data.vehicle_name || '';
-    row.dataset.vehicleSub  = data.vehicle_sub  || '';
-    row.dataset.tripDate    = data.trip_date    || '';
-    row.dataset.startTime   = data.start_time   || '';
-    row.dataset.endTime     = data.end_time     || '';
-    row.dataset.durationSeconds = data.duration_seconds || '';
-
-    const mainStart = row.querySelector('.trip-loc-main');
-    mainStart.textContent = data.start; mainStart.title = data.start;
-    const vSub = row.querySelector('.trip-vehicle-sub');
-    if (vSub) { vSub.textContent = data.vehicle_name || ''; vSub.style.display = data.vehicle_name ? '' : 'none'; }
-    const mainEnd = row.querySelectorAll('.trip-loc-main')[1];
-    mainEnd.textContent = data.end; mainEnd.title = data.end;
-    row.querySelector('.trip-mi').textContent = milesDisplay(data.miles);
-    const dateMain = row.querySelector('.trip-date-main');
-    if (dateMain) dateMain.textContent = data.trip_date
-      ? formatTripDate(data.trip_date)
-      : (data.timestamp || '').replace(/\s+\d{1,2}:\d{2}\s*[AP]M$/i, '').trim();
-    const timeEl = row.querySelector('.trip-time-display');
-    if (timeEl) {
-      timeEl.dataset.rawStart = data.start_time || '';
-      timeEl.dataset.rawEnd   = data.end_time   || '';
-      timeEl.textContent = formatTimeRange(data.start_time, data.end_time) || '–';
-    }
-    row.querySelector('.trip-del').setAttribute('onclick', `deleteTrip(${data.id}, ${data.miles})`);
-
-    const idx = tripsData.findIndex(t => t.id === data.id);
-    if (idx !== -1) {
-      tripsData[idx] = { ...tripsData[idx], ...data };
-      totalMilesAccum = totalMilesAccum - (oldMiles ?? 0) + (data.miles ?? 0);
-      updateTotalDisplay();
-    }
+    // Full re-render rather than patching the row in place: the trip's date
+    // may have changed, which can change where it belongs in the recency-
+    // sorted list, not just its own content.
+    await loadHistory();
     if (data.warning) alert(data.warning);
     closeEditModal();
   } catch { alert('Network error. Could not save changes.'); }
