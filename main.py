@@ -622,8 +622,15 @@ def log_trip():
 @app.route('/history')
 @login_required
 def history():
-    trips = Trip.query.filter_by(user_id=current_user.id)\
-                      .order_by(Trip.timestamp.desc()).all()
+    trips = Trip.query.filter_by(user_id=current_user.id).all()
+    # Sort by the trip's actual date (falling back to when it was logged, for
+    # trips with no trip_date) so the list reflects trip recency rather than
+    # data-entry order — a back-dated trip logged today shouldn't jump to the
+    # top. Ties (same date) break by id, i.e. most-recently-logged first.
+    trips.sort(
+        key=lambda t: (t.trip_date or (t.timestamp.strftime('%Y-%m-%d') if t.timestamp else ''), t.id),
+        reverse=True
+    )
     return jsonify([
         _trip_dict(
             t,
