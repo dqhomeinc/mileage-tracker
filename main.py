@@ -382,16 +382,36 @@ def check_trip_feasibility(start_time, end_time, distance_miles, duration_second
     return None
 
 
-def validate_trip_date(trip_date):
+def _parse_iso_date(value):
+    """A date.date, or None if value is missing/not a valid YYYY-MM-DD string."""
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, '%Y-%m-%d').date()
+    except ValueError:
+        return None
+
+
+def validate_trip_date(trip_date, client_today=None):
     """Error string if trip_date is set but isn't a real calendar date or is
-    in the future, else None. A trip date is optional, so None/empty is fine."""
+    in the future, else None. A trip date is optional, so None/empty is fine.
+
+    "In the future" is judged against the client's own local date when the
+    client sends one (client_today, raw request string — validated here, not
+    by the caller), falling back to the server's date otherwise. The server
+    and a browser can legitimately disagree on what day it is near midnight
+    if they're in different timezones, so trusting the server's own clock as
+    ground truth would risk rejecting a trip the client already considers
+    "today" and reports as such.
+    """
     if not trip_date:
         return None
     try:
         parsed = datetime.strptime(trip_date, '%Y-%m-%d').date()
     except ValueError:
         return f'"{trip_date}" is not a valid date.'
-    if parsed > date.today():
+    today = _parse_iso_date(client_today) or date.today()
+    if parsed > today:
         return 'Trip date cannot be in the future.'
     return None
 
@@ -583,7 +603,7 @@ def log_trip():
         return jsonify({'error': 'Missing trip data.'}), 400
 
     trip_date  = (data.get('trip_date') or '').strip() or None
-    date_error = validate_trip_date(trip_date)
+    date_error = validate_trip_date(trip_date, client_today=data.get('client_today'))
     if date_error:
         return jsonify({'error': date_error}), 400
 
@@ -674,7 +694,7 @@ def update_trip(trip_id):
         return jsonify({'error': 'Missing fields.'}), 400
 
     trip_date  = (data.get('trip_date') or '').strip() or None
-    date_error = validate_trip_date(trip_date)
+    date_error = validate_trip_date(trip_date, client_today=data.get('client_today'))
     if date_error:
         return jsonify({'error': date_error}), 400
 

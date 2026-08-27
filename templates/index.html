@@ -1041,6 +1041,7 @@ document.getElementById('logTripBtn').addEventListener('click', async () => {
     trip_date:  document.getElementById('tripDate').value      || null,
     start_time: getTimeValue('tripStartTime'),
     end_time:   getTimeValue('tripEndTime'),
+    client_today: TODAY_ISO,
   };
 
   try {
@@ -1378,6 +1379,7 @@ async function saveEdit() {
     trip_date:  document.getElementById('editTripDate').value  || null,
     start_time: getTimeValue('editStartTime'),
     end_time:   getTimeValue('editEndTime'),
+    client_today: TODAY_ISO,
   };
 
   btn.disabled = true;
