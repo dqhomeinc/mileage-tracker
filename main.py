@@ -1,6 +1,7 @@
 import base64
 import os
 import re
+from datetime import datetime, date
 import requests
 from dotenv import load_dotenv
 from itsdangerous import URLSafeTimedSerializer, SignatureExpired, BadSignature
@@ -381,6 +382,20 @@ def check_trip_feasibility(start_time, end_time, distance_miles, duration_second
     return None
 
 
+def validate_trip_date(trip_date):
+    """Error string if trip_date is set but isn't a real calendar date or is
+    in the future, else None. A trip date is optional, so None/empty is fine."""
+    if not trip_date:
+        return None
+    try:
+        parsed = datetime.strptime(trip_date, '%Y-%m-%d').date()
+    except ValueError:
+        return f'"{trip_date}" is not a valid date.'
+    if parsed > date.today():
+        return 'Trip date cannot be in the future.'
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Auth routes
 # ---------------------------------------------------------------------------
@@ -567,6 +582,11 @@ def log_trip():
     if not start or not end:
         return jsonify({'error': 'Missing trip data.'}), 400
 
+    trip_date  = (data.get('trip_date') or '').strip() or None
+    date_error = validate_trip_date(trip_date)
+    if date_error:
+        return jsonify({'error': date_error}), 400
+
     distance_miles   = data.get('distance_miles')
     duration_seconds = data.get('duration_seconds')
     distance_error   = None
@@ -581,7 +601,6 @@ def log_trip():
             distance_error = 'Could not calculate distance automatically. Edit this trip to add it later.'
 
     vehicle_id  = data.get('vehicle_id') or None
-    trip_date   = (data.get('trip_date')   or '').strip() or None
     start_time  = (data.get('start_time')  or '').strip() or None
     end_time    = (data.get('end_time')    or '').strip() or None
 
@@ -653,10 +672,15 @@ def update_trip(trip_id):
     distance_miles = data.get('distance_miles')
     if not start or not end:
         return jsonify({'error': 'Missing fields.'}), 400
+
+    trip_date  = (data.get('trip_date') or '').strip() or None
+    date_error = validate_trip_date(trip_date)
+    if date_error:
+        return jsonify({'error': date_error}), 400
+
     distance_miles = float(distance_miles) if distance_miles is not None else None
 
     vehicle_id  = data.get('vehicle_id') or None
-    trip_date   = (data.get('trip_date')   or '').strip() or None
     start_time  = (data.get('start_time')  or '').strip() or None
     end_time    = (data.get('end_time')    or '').strip() or None
 
