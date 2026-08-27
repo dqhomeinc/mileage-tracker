@@ -936,6 +936,35 @@ function guardDateInput(id) {
 guardDateInput('tripDate');
 guardDateInput('editTripDate');
 
+// Cap the native picker/typing to today so the calendar UI can't even offer
+// a future date (belt-and-suspenders alongside validateTripDate() below).
+function localToday() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+const TODAY_ISO = localToday();
+['tripDate', 'editTripDate'].forEach(id => {
+  const el = document.getElementById(id);
+  if (el) el.max = TODAY_ISO;
+});
+
+// Blocking check used by both the new-trip and edit-trip forms: a trip date
+// is optional, but if set it must be a real calendar date (JS's Date
+// constructor silently rolls "Feb 30" over into March, so components are
+// checked explicitly rather than trusted) and can't be in the future.
+function validateTripDate(value) {
+  if (!value) return null;
+  const m = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return 'Please enter a valid date.';
+  const [y, mo, d] = m.slice(1).map(Number);
+  const dt = new Date(y, mo - 1, d);
+  if (dt.getFullYear() !== y || dt.getMonth() !== mo - 1 || dt.getDate() !== d) {
+    return 'Please enter a valid date.';
+  }
+  if (value > TODAY_ISO) return 'Trip date cannot be in the future.';
+  return null;
+}
+
 
 // ─── Trip time feasibility check ───────────────────────────────────────────
 
@@ -998,6 +1027,9 @@ document.getElementById('logTripBtn').addEventListener('click', async () => {
 
   if (!start || !end) { showError('Please enter both a start and end location.'); return; }
 
+  const tripDateError = validateTripDate(document.getElementById('tripDate').value);
+  if (tripDateError) { showError(tripDateError); return; }
+
   const btn = document.getElementById('logTripBtn');
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span> Logging…';
@@ -1009,6 +1041,7 @@ document.getElementById('logTripBtn').addEventListener('click', async () => {
     trip_date:  document.getElementById('tripDate').value      || null,
     start_time: getTimeValue('tripStartTime'),
     end_time:   getTimeValue('tripEndTime'),
+    client_today: TODAY_ISO,
   };
 
   try {
@@ -1317,6 +1350,9 @@ async function saveEdit() {
   const end   = document.getElementById('editEnd').value.trim();
   if (!start || !end) return;
 
+  const tripDateError = validateTripDate(document.getElementById('editTripDate').value);
+  if (tripDateError) { alert(tripDateError); return; }
+
   const btn = document.getElementById('saveEditBtn');
 
   // The distance in editingTrip is only valid for the locations it was last
@@ -1343,6 +1379,7 @@ async function saveEdit() {
     trip_date:  document.getElementById('editTripDate').value  || null,
     start_time: getTimeValue('editStartTime'),
     end_time:   getTimeValue('editEndTime'),
+    client_today: TODAY_ISO,
   };
 
   btn.disabled = true;
