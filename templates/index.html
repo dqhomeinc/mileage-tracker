@@ -669,8 +669,12 @@ function restoreTripDraft() {
   let draft;
   try { draft = JSON.parse(raw); } catch { return; }
 
-  if (draft.start) document.getElementById('start').value = draft.start;
-  if (draft.end)   document.getElementById('end').value   = draft.end;
+  // Drafts store only the text, never a place ID, so a restored location has
+  // to route by address. This runs after an await, so a fast user may already
+  // have picked a suggestion by now — clear it rather than pairing their fresh
+  // place ID with the draft's text.
+  if (draft.start) setLocationText(document.getElementById('start'), draft.start);
+  if (draft.end)   setLocationText(document.getElementById('end'),   draft.end);
   if (draft.vehicleId) {
     document.getElementById('tripVehicle').value = draft.vehicleId;
     vehicleHintChange('tripVehicle', 'tripVehicleHint');
@@ -689,14 +693,29 @@ function restoreTripDraft() {
 
 const MAPS_BROWSER_KEY = {{ maps_browser_key | tojson }};
 
-// One suggestion request goes out per debounce interval per field, so these
-// two knobs are the whole autocomplete bill. Requests are billed individually
-// under the Essentials "Autocomplete Requests" SKU (10,000/month free): at the
-// ~4 requests per field these settings produce, the free tier covers roughly
-// 2,500 trips/month, against ~830 at the old 500ms / 3-char settings. Raise
-// them further if usage climbs; lower them only if suggestions feel sluggish.
+// Autocomplete is billed per request, not per session, because we take the
+// placeId straight off the prediction and never call Place Details. These two
+// knobs are the whole API bill: at ~6 requests per field the free tier covers
+// roughly 830 trips/month, at ~4 it covers about 2,500. Raise them further if
+// usage climbs; lower them only if the suggestions feel unresponsive.
 const AUTOCOMPLETE_DEBOUNCE_MS = 800;
 const AUTOCOMPLETE_MIN_CHARS   = 5;
+
+// Place ID of the suggestion the user picked for each field, keyed by input id.
+// Null whenever the text was typed or dictated rather than chosen, in which
+// case the server routes by address string instead.
+const selectedPlaceIds = { start: null, end: null };
+
+// Setting .value in code does not fire an input event, so the listener that
+// normally clears a field's place ID never runs. Any programmatic write must
+// therefore invalidate it here, or the field can show one address while the
+// trip routes by a place ID belonging to an entirely different location —
+// mileage for somewhere the user never saw. Callers that immediately assign a
+// real place ID (applySuggestion, a successful voice resolution) set it after.
+function setLocationText(input, text) {
+  input.value = text;
+  selectedPlaceIds[input.id] = null;
+}
 
 function setupAutocomplete(inputId, dropdownId) {
   const input = document.getElementById(inputId);
@@ -705,6 +724,9 @@ function setupAutocomplete(inputId, dropdownId) {
 
   input.addEventListener('input', () => {
     clearTimeout(debounceTimer);
+    // Typing invalidates any previously picked suggestion — the text no longer
+    // describes that place, so fall back to address routing until they pick again.
+    selectedPlaceIds[inputId] = null;
     const q = input.value.trim();
     if (q.length < AUTOCOMPLETE_MIN_CHARS) { hideDropdown(dropdown); return; }
     debounceTimer = setTimeout(() => fetchSuggestions(q, input, dropdown), AUTOCOMPLETE_DEBOUNCE_MS);
@@ -723,8 +745,7 @@ function setupAutocomplete(inputId, dropdownId) {
       if (prev) { active && active.classList.remove('active'); prev.classList.add('active'); }
     } else if (e.key === 'Enter' && active) {
       e.preventDefault();
-      input.value = active.dataset.label;
-      hideDropdown(dropdown);
+      applySuggestion(input, dropdown, active.dataset.label, active.dataset.placeId);
     } else if (e.key === 'Escape') {
       hideDropdown(dropdown);
     }
@@ -735,10 +756,15 @@ function setupAutocomplete(inputId, dropdownId) {
   });
 }
 
-// Places Autocomplete (New). The prediction's own display text is used as the
-// label verbatim: it keeps the place name ("The Home Depot, Albemarle Road,
-// Charlotte, NC, USA"), which is exactly what the previous implementation
-// threw away by rebuilding a label out of address components.
+// Commit a suggestion to the input, remembering its place ID so the trip is
+// routed by the exact place rather than by re-resolving this text.
+function applySuggestion(input, dropdown, label, placeId) {
+  input.value = label;
+  selectedPlaceIds[input.id] = placeId || null;
+  hideDropdown(dropdown);
+}
+
+// Places Autocomplete (New). Only the placeId and the display text are used.
 //
 // No session token is sent, deliberately. Sessions only pay off when they end
 // in a billable Place Details call; we take the placeId straight off the
@@ -771,7 +797,7 @@ function fetchSuggestions(query, input, dropdown) {
     .then(data => {
       const predictions = (data.suggestions || [])
         .map(s => s.placePrediction)
-        .filter(p => p && p.text && p.text.text);
+        .filter(p => p && p.placeId && p.text && p.text.text);
       if (!predictions.length) { hideDropdown(dropdown); return; }
       dropdown.innerHTML = '';
       predictions.slice(0, 6).forEach(p => {
@@ -780,10 +806,10 @@ function fetchSuggestions(query, input, dropdown) {
         item.className = 'autocomplete-item';
         item.textContent = label;
         item.dataset.label = label;
+        item.dataset.placeId = p.placeId;
         item.addEventListener('mousedown', (e) => {
           e.preventDefault();
-          input.value = label;
-          hideDropdown(dropdown);
+          applySuggestion(input, dropdown, label, p.placeId);
         });
         dropdown.appendChild(item);
       });
@@ -838,7 +864,11 @@ function setupVoice(buttonId, inputId, confirmBarId, confirmTextId, confirmYesId
 
   recognition.onresult = (event) => {
     const transcript = event.results[0][0].transcript;
-    input.value = transcript;
+    // Invalidate before resolving, not after: if the lookup below finds no
+    // prediction or throws, the field keeps the raw transcript and must fall
+    // back to address routing rather than the place ID of whatever the user
+    // had picked here previously.
+    setLocationText(input, transcript);
     stopRecording();
 
     // Show resolving state while we look up the best address match
@@ -846,8 +876,8 @@ function setupVoice(buttonId, inputId, confirmBarId, confirmTextId, confirmYesId
     btn.querySelector('i').className = 'fas fa-spinner fa-spin';
 
     // Resolve the transcript through the same Places autocomplete the typed
-    // path uses, taking the top prediction, so a dictated address resolves
-    // through the same provider as a typed one.
+    // path uses, taking the top prediction. This keeps the place ID, so a
+    // dictated address is routed as precisely as a picked one.
     fetch('https://places.googleapis.com/v1/places:autocomplete', {
       method: 'POST',
       headers: {
@@ -863,8 +893,11 @@ function setupVoice(buttonId, inputId, confirmBarId, confirmTextId, confirmYesId
       .then(data => {
         const top = (data.suggestions || [])
           .map(s => s.placePrediction)
-          .find(p => p && p.text && p.text.text);
-        if (top) input.value = top.text.text;
+          .find(p => p && p.placeId && p.text && p.text.text);
+        if (top) {
+          input.value = top.text.text;
+          selectedPlaceIds[input.id] = top.placeId;
+        }
         doneResolving();
         showConfirmBar(input.value);
       })
@@ -1090,6 +1123,8 @@ document.getElementById('logTripBtn').addEventListener('click', async () => {
   const vehicleVal = document.getElementById('tripVehicle').value;
   const payload = {
     start, end,
+    start_place_id: selectedPlaceIds.start,
+    end_place_id:   selectedPlaceIds.end,
     vehicle_id: vehicleVal ? parseInt(vehicleVal) : null,
     trip_date:  document.getElementById('tripDate').value      || null,
     start_time: getTimeValue('tripStartTime'),
@@ -1108,8 +1143,8 @@ document.getElementById('logTripBtn').addEventListener('click', async () => {
 
     await loadHistory();
 
-    document.getElementById('start').value = '';
-    document.getElementById('end').value   = '';
+    setLocationText(document.getElementById('start'), '');
+    setLocationText(document.getElementById('end'),   '');
     document.getElementById('start').classList.remove('is-valid');
     document.getElementById('end').classList.remove('is-valid');
     document.getElementById('tripVehicle').value   = '';
@@ -1212,6 +1247,8 @@ function prependTripRow(trip, prepend = true) {
   row.dataset.startTime   = trip.start_time   || '';
   row.dataset.endTime     = trip.end_time     || '';
   row.dataset.durationSeconds = trip.duration_seconds || '';
+  row.dataset.startPlaceId = trip.start_place_id || '';
+  row.dataset.endPlaceId   = trip.end_place_id   || '';
   row.innerHTML = `
     <div class="trip-loc">
       <div class="trip-loc-main" title="${escHtml(trip.start)}">${escHtml(trip.start)}</div>
@@ -1327,9 +1364,19 @@ function openEditModal(id) {
     durationSeconds: row.dataset.durationSeconds ? parseInt(row.dataset.durationSeconds, 10) : null,
     calcStart: row.dataset.start,
     calcEnd:   row.dataset.end,
+    // The place IDs these locations were originally resolved to, kept only
+    // while the corresponding text is untouched (see placeIdsForEdit).
+    origStart:   row.dataset.start,
+    origEnd:     row.dataset.end,
+    startPlaceId: row.dataset.startPlaceId || null,
+    endPlaceId:   row.dataset.endPlaceId   || null,
   };
-  document.getElementById('editStart').value = row.dataset.start;
-  document.getElementById('editEnd').value   = row.dataset.end;
+  // placeIdsForEdit reads the trip's stored IDs rather than selectedPlaceIds,
+  // so these are already safe — but go through the helper anyway to keep one
+  // rule for every programmatic write, including a stale entry left by a
+  // previous time this modal was open.
+  setLocationText(document.getElementById('editStart'), row.dataset.start);
+  setLocationText(document.getElementById('editEnd'),   row.dataset.end);
   document.getElementById('editMiles').textContent = editingTrip.miles != null ? editingTrip.miles : 'Pending';
 
   const vehicleSel = document.getElementById('editVehicle');
@@ -1358,6 +1405,22 @@ document.getElementById('editModal').addEventListener('click', (e) => {
   if (e.target === document.getElementById('editModal')) closeEditModal();
 });
 
+// A stored place ID only describes the location it was resolved from, so it
+// survives an edit exactly as long as that field's text is unchanged; a changed
+// location falls back to address routing, which Routes geocodes itself.
+//
+// The edit inputs do have autocomplete, so picking a fresh suggestion there
+// records a place ID in selectedPlaceIds that this deliberately ignores —
+// carrying it through would mean tracking which field it belongs to across
+// modal opens. The cost is only that an edited location routes by address
+// rather than by ID, which is what every free-typed location already does.
+function placeIdsForEdit(start, end) {
+  return {
+    start_place_id: start === editingTrip.origStart ? editingTrip.startPlaceId : null,
+    end_place_id:   end   === editingTrip.origEnd   ? editingTrip.endPlaceId   : null,
+  };
+}
+
 // Calls /calculate for the given start/end and, on success, updates
 // editingTrip's miles/duration (and the locations they're now current
 // for) in place. Returns whether it succeeded; never throws.
@@ -1366,7 +1429,7 @@ async function fetchEditDistance(start, end) {
     const resp = await fetch('/calculate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ start, end })
+      body: JSON.stringify({ start, end, ...placeIdsForEdit(start, end) })
     });
     const data = await resp.json();
     if (resp.ok) {
@@ -1427,6 +1490,7 @@ async function saveEdit() {
   const vehicleVal = document.getElementById('editVehicle').value;
   const payload = {
     start, end, distance_miles: editingTrip.miles,
+    ...placeIdsForEdit(start, end),
     duration_seconds: editingTrip.durationSeconds,
     vehicle_id: vehicleVal ? parseInt(vehicleVal) : null,
     trip_date:  document.getElementById('editTripDate').value  || null,

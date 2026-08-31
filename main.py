@@ -107,6 +107,12 @@ class Trip(db.Model):
     start_time     = db.Column(db.String(5),  nullable=True)
     end_time       = db.Column(db.String(5),  nullable=True)
     duration_seconds = db.Column(db.Integer, nullable=True)
+    # Google Places IDs for the locations, when the user picked them from
+    # autocomplete. Stored so a recalculation routes the same two places
+    # instead of re-resolving the display text; null for free-typed trips and
+    # for every trip logged before the Routes migration.
+    start_place_id = db.Column(db.String(255), nullable=True)
+    end_place_id   = db.Column(db.String(255), nullable=True)
 
 
 @login_manager.user_loader
@@ -138,6 +144,8 @@ def _trip_dict(trip, vehicle_name=None, vehicle_sub=None):
         'start_time':   trip.start_time,
         'end_time':     trip.end_time,
         'duration_seconds': trip.duration_seconds,
+        'start_place_id': trip.start_place_id,
+        'end_place_id':   trip.end_place_id,
     }
 
 
@@ -163,6 +171,8 @@ def _migrate_db():
                 ('start_time', 'VARCHAR(5)'),
                 ('end_time',   'VARCHAR(5)'),
                 ('duration_seconds', 'INTEGER'),
+                ('start_place_id', 'VARCHAR(255)'),
+                ('end_place_id',   'VARCHAR(255)'),
             ]
             for col, typ in additions:
                 if col not in existing:
@@ -187,6 +197,8 @@ def _migrate_db():
                 ('start_time', 'VARCHAR(5)'),
                 ('end_time',   'VARCHAR(5)'),
                 ('duration_seconds', 'INTEGER'),
+                ('start_place_id', 'VARCHAR(255)'),
+                ('end_place_id',   'VARCHAR(255)'),
             ]
             for col, typ in additions:
                 if col not in existing:
@@ -301,13 +313,16 @@ def _mail_config_ok():
 # ---------------------------------------------------------------------------
 # Distance calculation: Google Routes API
 # ---------------------------------------------------------------------------
-# Autocomplete and routing now resolve through one provider. They previously
-# did not: the client autocompleted against Nominatim, which has POI data and
-# found the right place, then discarded its coordinates and sent a label
-# rebuilt from address components. The server re-resolved that label with
-# Geocodio, which has no POI data and falls back to fuzzy street-name matching,
-# landing on a street centroid — sometimes in a different city. The same trip
-# was resolved two different ways and could be overstated by 50%.
+# Routing is done by Places place ID whenever the user picked a suggestion from
+# autocomplete, so the distance is computed for the exact place they chose and
+# no geocoding step happens at all. Free-typed and voice-entered text falls
+# back to an address string, which Routes geocodes itself.
+#
+# Both paths now resolve through one provider. The previous split — Nominatim
+# autocomplete on the client, Geocodio geocoding on the server — resolved the
+# same trip two different ways: the client found the right place, discarded its
+# coordinates, and the server re-resolved a rebuilt label string with a
+# geocoder that has no POI data. That could overstate a trip by 50%+.
 
 ROUTES_API_URL = 'https://routes.googleapis.com/directions/v2:computeRoutes'
 
@@ -316,6 +331,11 @@ ROUTES_API_URL = 'https://routes.googleapis.com/directions/v2:computeRoutes'
 ROUTES_FIELD_MASK = 'routes.distanceMeters,routes.duration'
 
 METERS_PER_MILE = 1609.344
+
+
+def _route_waypoint(place_id, address):
+    """A Routes waypoint: place ID when we have one, else raw address text."""
+    return {'placeId': place_id} if place_id else {'address': address}
 
 
 def _parse_route_duration(value):
@@ -328,8 +348,9 @@ def _parse_route_duration(value):
         return None
 
 
-def calculate_driving_miles(start_text, end_text):
-    """(miles, duration_seconds) for the driving route between two addresses.
+def calculate_driving_miles(start_text, end_text,
+                            start_place_id=None, end_place_id=None):
+    """(miles, duration_seconds) for the driving route between two points.
 
     Raises ValueError when the route can't be determined — the caller turns
     that into a user-facing message.
@@ -342,8 +363,8 @@ def calculate_driving_miles(start_text, end_text):
             'X-Goog-FieldMask': ROUTES_FIELD_MASK,
         },
         json={
-            'origin':      {'address': start_text},
-            'destination': {'address': end_text},
+            'origin':      _route_waypoint(start_place_id, start_text),
+            'destination': _route_waypoint(end_place_id, end_text),
             'travelMode': 'DRIVE',
             'units': 'IMPERIAL',
             # routingPreference is deliberately left unset. TRAFFIC_AWARE moves
@@ -609,7 +630,11 @@ def calculate():
     if not start or not end:
         return jsonify({'error': 'Both start and end locations are required.'}), 400
     try:
-        miles, duration_seconds = calculate_driving_miles(start, end)
+        miles, duration_seconds = calculate_driving_miles(
+            start, end,
+            start_place_id=(data.get('start_place_id') or None),
+            end_place_id=(data.get('end_place_id') or None),
+        )
     except ValueError as e:
         return jsonify({'error': str(e)}), 422
     except Exception:
@@ -636,6 +661,9 @@ def log_trip():
     if date_error:
         return jsonify({'error': date_error}), 400
 
+    start_place_id = (data.get('start_place_id') or '').strip() or None
+    end_place_id   = (data.get('end_place_id')   or '').strip() or None
+
     distance_miles   = data.get('distance_miles')
     duration_seconds = data.get('duration_seconds')
     distance_error   = None
@@ -643,7 +671,11 @@ def log_trip():
         distance_miles = float(distance_miles)
     else:
         try:
-            distance_miles, duration_seconds = calculate_driving_miles(start, end)
+            distance_miles, duration_seconds = calculate_driving_miles(
+                start, end,
+                start_place_id=start_place_id,
+                end_place_id=end_place_id,
+            )
         except ValueError as e:
             distance_error = str(e)
         except Exception:
@@ -676,6 +708,8 @@ def log_trip():
         start_time=start_time,
         end_time=end_time,
         duration_seconds=duration_seconds,
+        start_place_id=start_place_id,
+        end_place_id=end_place_id,
     )
     db.session.add(trip)
     db.session.commit()
@@ -748,6 +782,12 @@ def update_trip(trip_id):
     warning = None
     if distance_miles is not None:
         warning = check_trip_feasibility(start_time, end_time, distance_miles, duration_seconds)
+
+    # The client sends a place ID back only for a location it left untouched;
+    # editing the text clears it, so the trip falls back to address routing
+    # rather than staying pinned to the place the old text resolved to.
+    trip.start_place_id = (data.get('start_place_id') or '').strip() or None
+    trip.end_place_id   = (data.get('end_place_id')   or '').strip() or None
 
     trip.start_location = start
     trip.end_location   = end
