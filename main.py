@@ -53,7 +53,12 @@ app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
 # so password reset emails are sent over HTTPS instead of raw SMTP.
 app.config['BREVO_API_KEY'] = os.environ.get('BREVO_API_KEY')
 app.config['BREVO_SENDER_EMAIL'] = os.environ.get('BREVO_SENDER_EMAIL')
-app.config['GEOCODIO_API_KEY'] = os.environ.get('GEOCODIO_API_KEY')
+# Google Maps Platform. Two keys with different exposure: the browser key is
+# served to the page for Places Autocomplete and is restricted by HTTP
+# referrer; the server key never leaves the backend and is restricted to the
+# Routes API.
+app.config['GOOGLE_MAPS_BROWSER_KEY'] = os.environ.get('GOOGLE_MAPS_BROWSER_KEY')
+app.config['GOOGLE_MAPS_SERVER_KEY'] = os.environ.get('GOOGLE_MAPS_SERVER_KEY')
 
 db = SQLAlchemy(app)
 login_manager = LoginManager(app)
@@ -294,54 +299,76 @@ def _mail_config_ok():
 
 
 # ---------------------------------------------------------------------------
-# Distance calculation: Geocodio geocoding + driving distance
+# Distance calculation: Google Routes API
 # ---------------------------------------------------------------------------
+# Autocomplete and routing now resolve through one provider. They previously
+# did not: the client autocompleted against Nominatim, which has POI data and
+# found the right place, then discarded its coordinates and sent a label
+# rebuilt from address components. The server re-resolved that label with
+# Geocodio, which has no POI data and falls back to fuzzy street-name matching,
+# landing on a street centroid — sometimes in a different city. The same trip
+# was resolved two different ways and could be overstated by 50%.
 
-GEOCODIO_BASE_URL = 'https://api.geocod.io/v2'
+ROUTES_API_URL = 'https://routes.googleapis.com/directions/v2:computeRoutes'
+
+# Only the two fields we use — Routes bills on the field mask, and requesting
+# anything beyond distance/duration moves the call to a pricier SKU.
+ROUTES_FIELD_MASK = 'routes.distanceMeters,routes.duration'
+
+METERS_PER_MILE = 1609.344
 
 
-def _geocodio_headers():
-    return {'Authorization': f'Bearer {app.config["GEOCODIO_API_KEY"]}'}
-
-
-def geocode(address):
-    resp = requests.get(
-        f'{GEOCODIO_BASE_URL}/geocode',
-        params={'q': address, 'limit': 1},
-        headers=_geocodio_headers(),
-        timeout=8
-    )
-    if resp.status_code == 422:
-        raise ValueError(f'Could not geocode address: "{address}"')
-    resp.raise_for_status()
-    results = resp.json().get('results')
-    if not results:
-        raise ValueError(f'Could not geocode address: "{address}"')
-    location = results[0]['location']
-    return location['lat'], location['lng']
+def _parse_route_duration(value):
+    """Routes returns duration as a string like '1978s'. None if unparseable."""
+    if not isinstance(value, str) or not value.endswith('s'):
+        return None
+    try:
+        return int(float(value[:-1]))
+    except ValueError:
+        return None
 
 
 def calculate_driving_miles(start_text, end_text):
-    start_lat, start_lon = geocode(start_text)
-    end_lat, end_lon = geocode(end_text)
+    """(miles, duration_seconds) for the driving route between two addresses.
 
-    resp = requests.get(
-        f'{GEOCODIO_BASE_URL}/distance',
-        params={
-            'origin': f'{start_lat},{start_lon}',
-            'destinations[]': f'{end_lat},{end_lon}',
-            'mode': 'driving',
-            'units': 'miles',
+    Raises ValueError when the route can't be determined — the caller turns
+    that into a user-facing message.
+    """
+    resp = requests.post(
+        ROUTES_API_URL,
+        headers={
+            'Content-Type': 'application/json',
+            'X-Goog-Api-Key': app.config['GOOGLE_MAPS_SERVER_KEY'],
+            'X-Goog-FieldMask': ROUTES_FIELD_MASK,
         },
-        headers=_geocodio_headers(),
-        timeout=10
+        json={
+            'origin':      {'address': start_text},
+            'destination': {'address': end_text},
+            'travelMode': 'DRIVE',
+            'units': 'IMPERIAL',
+            # routingPreference is deliberately left unset. TRAFFIC_AWARE moves
+            # the request to the Compute Routes Pro SKU, and a mileage log
+            # shouldn't record a different distance depending on traffic.
+        },
+        timeout=10,
     )
+    if resp.status_code == 400:
+        raise ValueError('Could not find a driving route between those locations.')
     resp.raise_for_status()
-    destinations = resp.json().get('destinations')
-    if not destinations:
-        raise ValueError('Geocodio could not find a driving route between those locations.')
-    dest = destinations[0]
-    return round(dest['distance_miles'], 2), dest['duration_seconds']
+
+    # A location Routes can't geocode comes back as HTTP 200 with an empty JSON
+    # body rather than an error status, so an empty result is a real failure
+    # and not something to pass along as a valid route.
+    routes = resp.json().get('routes')
+    if not routes:
+        raise ValueError(
+            'Could not find a driving route between those locations. '
+            'Try picking each address from the suggestions.'
+        )
+
+    route = routes[0]
+    miles = round(route['distanceMeters'] / METERS_PER_MILE, 2)
+    return miles, _parse_route_duration(route.get('duration'))
 
 
 def _elapsed_seconds(start_time, end_time):
@@ -360,8 +387,8 @@ def _elapsed_seconds(start_time, end_time):
     return (end_min - start_min) * 60
 
 
-FEASIBILITY_MIN_RATIO = 0.5  # flag "too fast" if elapsed < 50% of Geocodio's expected duration
-FEASIBILITY_MAX_RATIO = 3.0  # flag "too slow" if elapsed > 300% of Geocodio's expected duration
+FEASIBILITY_MIN_RATIO = 0.5  # flag "too fast" if elapsed < 50% of the Routes API's expected duration
+FEASIBILITY_MAX_RATIO = 3.0  # flag "too slow" if elapsed > 300% of the Routes API's expected duration
 
 
 def check_trip_feasibility(start_time, end_time, distance_miles, duration_seconds):
@@ -568,7 +595,9 @@ def reset_password(token):
 @app.route('/')
 @login_required
 def index():
-    return render_template('index.html', username=current_user.username, photo_data=current_user.photo_data)
+    return render_template('index.html', username=current_user.username,
+                           photo_data=current_user.photo_data,
+                           maps_browser_key=app.config['GOOGLE_MAPS_BROWSER_KEY'] or '')
 
 
 @app.route('/calculate', methods=['POST'])

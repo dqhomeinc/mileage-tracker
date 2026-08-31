@@ -14,6 +14,12 @@ services:
         value: 3.11.0
       # DATABASE_URL: set to your Neon connection string (Neon dashboard →
       # Connection Details). Any ?sslmode=... suffix is fine — main.py strips it.
-      # Set BREVO_API_KEY, BREVO_SENDER_EMAIL (a verified Brevo sender), and
-      # GEOCODIO_API_KEY manually in the Render dashboard after deployment
+      # Set BREVO_API_KEY, BREVO_SENDER_EMAIL (a verified Brevo sender),
+      # GOOGLE_MAPS_BROWSER_KEY, and GOOGLE_MAPS_SERVER_KEY manually in the
+      # Render dashboard after deployment
       # (Dashboard → mileage-tracker → Environment)
+      #
+      # The two Google keys are separate on purpose: the browser key is served
+      # to the page and must be restricted by HTTP referrer to this app's
+      # domain (Places API only); the server key stays on the backend and is
+      # restricted to the Routes API. Don't collapse them into one key.
