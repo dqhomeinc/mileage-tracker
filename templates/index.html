@@ -687,6 +687,14 @@ function restoreTripDraft() {
 
 // ─── Autocomplete ─────────────────────────────────────────────────────────
 
+// One suggestion request goes out per debounce interval per field, so these
+// two knobs set how much traffic typing an address generates. The old 500ms /
+// 3-char settings fired roughly six requests per field; 800ms / 5 chars cuts
+// that to about four, which matters both for rate limits and because the early
+// keystrokes of an address rarely produce a useful suggestion anyway.
+const AUTOCOMPLETE_DEBOUNCE_MS = 800;
+const AUTOCOMPLETE_MIN_CHARS   = 5;
+
 function setupAutocomplete(inputId, dropdownId) {
   const input = document.getElementById(inputId);
   const dropdown = document.getElementById(dropdownId);
@@ -695,8 +703,8 @@ function setupAutocomplete(inputId, dropdownId) {
   input.addEventListener('input', () => {
     clearTimeout(debounceTimer);
     const q = input.value.trim();
-    if (q.length < 3) { hideDropdown(dropdown); return; }
-    debounceTimer = setTimeout(() => fetchSuggestions(q, input, dropdown), 500);
+    if (q.length < AUTOCOMPLETE_MIN_CHARS) { hideDropdown(dropdown); return; }
+    debounceTimer = setTimeout(() => fetchSuggestions(q, input, dropdown), AUTOCOMPLETE_DEBOUNCE_MS);
   });
 
   input.addEventListener('keydown', (e) => {
