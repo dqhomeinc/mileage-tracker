@@ -75,6 +75,15 @@ class User(UserMixin, db.Model):
     email = db.Column(db.String(120), unique=True, nullable=False)
     password_hash = db.Column(db.String(256), nullable=False)
     photo_data = db.Column(db.Text, nullable=True)
+    # The vehicle preselected when logging a new trip, null until the user picks
+    # one — nothing sets it implicitly. Held here rather than as
+    # an is_default flag on Vehicle so "at most one default" is a property of
+    # the shape of the data instead of something the write path has to remember
+    # to maintain by unsetting the previous one. Deliberately not a foreign key:
+    # user and vehicle would then reference each other, and the raw ALTER TABLE
+    # in _migrate_db() can't add a constraint. Ownership is checked in the route
+    # and delete_vehicle() clears it, so a stale id can't outlive its vehicle.
+    default_vehicle_id = db.Column(db.Integer, nullable=True)
     trips    = db.relationship('Trip', backref='user', lazy=True, cascade='all, delete-orphan')
     vehicles = db.relationship('Vehicle', backref='owner', lazy=True, cascade='all, delete-orphan')
 
@@ -127,7 +136,8 @@ def load_user(user_id):
 def _vehicle_dict(v):
     sub = ' '.join(filter(None, [v.year, v.make, v.model]))
     return {'id': v.id, 'name': v.name, 'year': v.year, 'make': v.make,
-            'model': v.model, 'sub': sub}
+            'model': v.model, 'sub': sub,
+            'is_default': v.id == current_user.default_vehicle_id}
 
 
 def _trip_dict(trip, vehicle_name=None, vehicle_sub=None):
@@ -217,6 +227,8 @@ def _migrate_db():
             existing_user_cols = {row[0] for row in result}
         if 'photo_data' not in existing_user_cols:
             conn.execute(db.text('ALTER TABLE "user" ADD COLUMN photo_data TEXT'))
+        if 'default_vehicle_id' not in existing_user_cols:
+            conn.execute(db.text('ALTER TABLE "user" ADD COLUMN default_vehicle_id INTEGER'))
 
         conn.commit()
 
@@ -846,6 +858,9 @@ def create_vehicle():
         make=(data.get('make')  or '').strip() or None,
         model=(data.get('model') or '').strip() or None,
     )
+    # Adding a vehicle never sets it as the default, not even the first one:
+    # the default only ever changes because someone chose it. That keeps one
+    # rule for the whole feature rather than an implicit case to reason about.
     db.session.add(v)
     db.session.commit()
     return jsonify(_vehicle_dict(v)), 201
@@ -883,9 +898,39 @@ def delete_vehicle(vehicle_id):
     if not v:
         return jsonify({'error': 'Vehicle not found.'}), 404
     Trip.query.filter_by(vehicle_id=vehicle_id).update({'vehicle_id': None})
+    # Clear the default alongside the trips, or the id would outlive the row it
+    # points at and the trip form would try to preselect a vehicle that is gone.
+    if current_user.default_vehicle_id == vehicle_id:
+        current_user.default_vehicle_id = None
     db.session.delete(v)
     db.session.commit()
     return jsonify({'success': True})
+
+
+@app.route('/vehicles/default', methods=['PUT'])
+@login_required
+def set_default_vehicle():
+    """Set or clear the vehicle preselected when logging a new trip.
+
+    One endpoint for both: a null vehicle_id clears the default, which is how
+    the UI toggles off the vehicle that is currently set.
+    """
+    data = request.get_json() or {}
+    vehicle_id = data.get('vehicle_id')
+
+    if vehicle_id is None:
+        current_user.default_vehicle_id = None
+        db.session.commit()
+        return jsonify({'default_vehicle_id': None})
+
+    # Look the vehicle up scoped to the owner, so one user can't point their
+    # default at another user's vehicle by guessing an id.
+    v = Vehicle.query.filter_by(id=int(vehicle_id), user_id=current_user.id).first()
+    if not v:
+        return jsonify({'error': 'Vehicle not found.'}), 404
+    current_user.default_vehicle_id = v.id
+    db.session.commit()
+    return jsonify({'default_vehicle_id': v.id})
 
 
 @app.route('/my-vehicles')
