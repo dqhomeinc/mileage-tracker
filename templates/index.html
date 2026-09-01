@@ -631,6 +631,21 @@ function populateVehicleSelects() {
     });
     sel.value = cur;
   });
+  applyDefaultVehicle();
+}
+
+// The default vehicle preselects the new-trip form only, and only while the
+// user hasn't chosen something themselves. The edit modal is deliberately
+// excluded: it shows the vehicle a trip was logged with, and defaulting there
+// would silently rewrite that on save. Vehicle stays optional — this picks the
+// starting value, it doesn't stop anyone clearing it.
+function applyDefaultVehicle() {
+  const sel = document.getElementById('tripVehicle');
+  if (!sel || sel.value) return;
+  const def = vehiclesList.find(v => v.is_default);
+  if (!def) return;
+  sel.value = def.id;
+  vehicleHintChange('tripVehicle', 'tripVehicleHint');
 }
 
 function vehicleHintChange(selectId, hintId) {
@@ -650,14 +665,24 @@ function vehicleHintChange(selectId, hintId) {
 const TRIP_DRAFT_KEY = 'tripFormDraft';
 
 function saveTripDraft() {
-  sessionStorage.setItem(TRIP_DRAFT_KEY, JSON.stringify({
+  const draft = {
     start:     document.getElementById('start').value,
     end:       document.getElementById('end').value,
     vehicleId: document.getElementById('tripVehicle').value,
     tripDate:  document.getElementById('tripDate').value,
     startTime: document.getElementById('tripStartTime').value,
     endTime:   document.getElementById('tripEndTime').value,
-  }));
+  };
+  // An untouched form is not a draft. Saving one means every return to this
+  // page "restores" emptiness over whatever the page would otherwise set up:
+  // leaving for the vehicles page and coming back would wipe the preselected
+  // default vehicle, because the restore is deliberately allowed to write an
+  // empty value (that is how a deliberately cleared vehicle survives).
+  if (!Object.values(draft).some(Boolean)) {
+    sessionStorage.removeItem(TRIP_DRAFT_KEY);
+    return;
+  }
+  sessionStorage.setItem(TRIP_DRAFT_KEY, JSON.stringify(draft));
 }
 window.addEventListener('pagehide', saveTripDraft);
 
@@ -675,7 +700,11 @@ function restoreTripDraft() {
   // place ID with the draft's text.
   if (draft.start) setLocationText(document.getElementById('start'), draft.start);
   if (draft.end)   setLocationText(document.getElementById('end'),   draft.end);
-  if (draft.vehicleId) {
+  // Tested for presence rather than truthiness so an empty value restores too:
+  // that means the user had deliberately cleared the vehicle before leaving,
+  // and a draft is a record of what they actually had on screen, so it wins
+  // over the default that populateVehicleSelects just applied.
+  if ('vehicleId' in draft) {
     document.getElementById('tripVehicle').value = draft.vehicleId;
     vehicleHintChange('tripVehicle', 'tripVehicleHint');
   }
@@ -1147,8 +1176,11 @@ document.getElementById('logTripBtn').addEventListener('click', async () => {
     setLocationText(document.getElementById('end'),   '');
     document.getElementById('start').classList.remove('is-valid');
     document.getElementById('end').classList.remove('is-valid');
+    // Clear first, then re-apply: logging one trip and immediately logging
+    // another should start from the default again, not from a blank select.
     document.getElementById('tripVehicle').value   = '';
     document.getElementById('tripVehicleHint').textContent = '';
+    applyDefaultVehicle();
     document.getElementById('tripDate').value      = '';
     initTimeInput('tripStartTime');
     initTimeInput('tripEndTime');

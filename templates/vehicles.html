@@ -74,6 +74,20 @@
     }
     .vehicle-edit:hover { background: #EEF2FF; color: var(--primary); }
     .vehicle-del:hover { background: #FEF2F2; color: #EF4444; }
+    .vehicle-star {
+      width: 28px; height: 28px; border-radius: 6px; flex-shrink: 0;
+      background: transparent; border: none; color: #CBD5E1;
+      cursor: pointer; display: flex; align-items: center; justify-content: center;
+      font-size: .75rem; transition: all .2s;
+    }
+    .vehicle-star:hover { background: #FFFBEB; color: #F59E0B; }
+    .vehicle-star.is-default { color: #F59E0B; }
+    .vehicle-default-badge {
+      display: inline-block; margin-left: 6px; padding: 1px 6px;
+      border-radius: 999px; background: #FFFBEB; color: #B45309;
+      font-size: .65rem; font-weight: 700; letter-spacing: .02em;
+      vertical-align: middle;
+    }
     .btn-add-vehicle {
       padding: 5px 12px; border-radius: 8px; white-space: nowrap;
       border: 1.5px dashed var(--border); background: transparent;
@@ -201,10 +215,17 @@ function renderVehicleList() {
     item.id = `vehicle-${v.id}`;
     item.innerHTML = `
       <div class="vehicle-info">
-        <div class="vehicle-name">${escHtml(v.name)}</div>
+        <div class="vehicle-name">${escHtml(v.name)}${
+          v.is_default ? '<span class="vehicle-default-badge">DEFAULT</span>' : ''}</div>
         ${v.sub ? `<div class="vehicle-sub-text">${escHtml(v.sub)}</div>` : ''}
       </div>
       <div class="vehicle-actions">
+        <button class="vehicle-star${v.is_default ? ' is-default' : ''}"
+                onclick="toggleDefaultVehicle(${v.id})"
+                title="${v.is_default ? 'Remove as default vehicle' : 'Set as default vehicle'}"
+                aria-pressed="${v.is_default ? 'true' : 'false'}">
+          <i class="fa${v.is_default ? 's' : 'r'} fa-star"></i>
+        </button>
         <button class="vehicle-edit" onclick="editVehicle(${v.id})" title="Edit vehicle">
           <i class="fas fa-pen"></i>
         </button>
@@ -315,6 +336,26 @@ async function deleteVehicle(id) {
     vehiclesList = vehiclesList.filter(v => v.id !== id);
     document.getElementById(`vehicle-${id}`)?.remove();
     if (!vehiclesList.length) document.getElementById('vehiclesEmpty').style.display = '';
+  } catch { /* silent */ }
+}
+
+// Star toggles the default: starring an unstarred vehicle makes it the default,
+// starring the current default clears it (vehicle stays optional on a trip).
+async function toggleDefaultVehicle(id) {
+  const wasDefault = vehiclesList.find(v => v.id === id)?.is_default;
+  try {
+    const resp = await fetch('/vehicles/default', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ vehicle_id: wasDefault ? null : id })
+    });
+    if (!resp.ok) return;
+    const data = await resp.json();
+    // Re-derive every flag from the id the server reports rather than flipping
+    // the one that was clicked, so the list can't end up showing two defaults
+    // if this tab's copy was stale.
+    vehiclesList.forEach(v => { v.is_default = v.id === data.default_vehicle_id; });
+    renderVehicleList();
   } catch { /* silent */ }
 }
 
