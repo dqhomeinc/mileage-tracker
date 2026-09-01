@@ -9,7 +9,7 @@ A web app for logging and tracking driving mileage. Enter a start and end addres
 - **Account system** — register, log in, and reset your password via email
 - **Profile page** — view your account info, change your password, edit your username (checked live for availability as you type), and upload a profile photo
 - **Distance calculation** — uses the Google Routes API to calculate real driving distances between two addresses; if a distance can't be calculated (e.g. an unresolvable address), the trip is still logged with the distance marked pending and can be recalculated later from the edit screen
-- **Address autocomplete** — type a partial address and select from live Google Places suggestions
+- **Address autocomplete** — type a partial address and select from live Google Places suggestions; the selected place is routed by its place ID, so the distance is computed for exactly the place you picked
 - **Voice input** — speak an address into either location field; the app transcribes it and resolves it to the closest matching place *(see known issues)*
 - **Vehicle management** — add, edit, and remove vehicles (nickname, year, make, model) from their own page; select which vehicle was used when logging each trip
 - **Trip date & time** — optionally record the date a trip took place plus start and end times; history shows `–` when times are omitted
