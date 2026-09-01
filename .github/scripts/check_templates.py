@@ -12,7 +12,8 @@ TEMPLATES_WITH_CONTEXT = {
     'login.html': {},
     'forgot_password.html': {},
     'reset_password.html': {'token': 'dummy-token'},
-    'index.html': {'username': 'tester', 'photo_data': None},
+    'index.html': {'username': 'tester', 'photo_data': None,
+                   'maps_browser_key': 'test-browser-key'},
     'vehicles.html': {'username': 'tester', 'photo_data': None},
     'profile.html': {'username': 'tester', 'email': 't@example.com', 'photo_data': None},
 }

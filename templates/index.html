@@ -685,13 +685,16 @@ function restoreTripDraft() {
 }
 
 
-// ─── Autocomplete ─────────────────────────────────────────────────────────
+// ─── Address autocomplete (Google Places) ─────────────────────────────────
+
+const MAPS_BROWSER_KEY = {{ maps_browser_key | tojson }};
 
 // One suggestion request goes out per debounce interval per field, so these
-// two knobs set how much traffic typing an address generates. The old 500ms /
-// 3-char settings fired roughly six requests per field; 800ms / 5 chars cuts
-// that to about four, which matters both for rate limits and because the early
-// keystrokes of an address rarely produce a useful suggestion anyway.
+// two knobs are the whole autocomplete bill. Requests are billed individually
+// under the Essentials "Autocomplete Requests" SKU (10,000/month free): at the
+// ~4 requests per field these settings produce, the free tier covers roughly
+// 2,500 trips/month, against ~830 at the old 500ms / 3-char settings. Raise
+// them further if usage climbs; lower them only if suggestions feel sluggish.
 const AUTOCOMPLETE_DEBOUNCE_MS = 800;
 const AUTOCOMPLETE_MIN_CHARS   = 5;
 
@@ -732,24 +735,47 @@ function setupAutocomplete(inputId, dropdownId) {
   });
 }
 
+// Places Autocomplete (New). The prediction's own display text is used as the
+// label verbatim: it keeps the place name ("The Home Depot, Albemarle Road,
+// Charlotte, NC, USA"), which is exactly what the previous implementation
+// threw away by rebuilding a label out of address components.
+//
+// No session token is sent, deliberately. Sessions only pay off when they end
+// in a billable Place Details call; we take the placeId straight off the
+// prediction and never call Place Details, so each request bills individually
+// under the Essentials "Autocomplete Requests" SKU either way. Adding a token
+// would move this onto session billing for no benefit.
+//
+// The region is deliberately unrestricted. Pinning it to the US made a foreign
+// address resolve to a plausible but wrong domestic one ("123 Yonge Street,
+// Toronto, ON" came back as "123 Utopia Street, North Topsail Beach") rather
+// than simply returning nothing — the exact silent-wrong-place failure this
+// migration set out to remove. Results are already biased toward the user's
+// location by their IP, so nearby matches surface without the hard filter.
 function fetchSuggestions(query, input, dropdown) {
-  const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&q=${encodeURIComponent(query)}&limit=6&addressdetails=1`;
-  fetch(url, { headers: { 'Accept-Language': 'en' } })
-    .then(r => r.json())
+  fetch('https://places.googleapis.com/v1/places:autocomplete', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Goog-Api-Key': MAPS_BROWSER_KEY,
+    },
+    body: JSON.stringify({ input: query })
+  })
+    .then(r => {
+      // An error status still carries a JSON body, so without this check a 403
+      // from a misconfigured key would fall through to the empty-results path
+      // and look identical to "no matches".
+      if (!r.ok) throw new Error(`Places autocomplete failed: HTTP ${r.status}`);
+      return r.json();
+    })
     .then(data => {
-      if (!data.length) { hideDropdown(dropdown); return; }
+      const predictions = (data.suggestions || [])
+        .map(s => s.placePrediction)
+        .filter(p => p && p.text && p.text.text);
+      if (!predictions.length) { hideDropdown(dropdown); return; }
       dropdown.innerHTML = '';
-      data.forEach(result => {
-        const a = result.address || {};
-        const road = a.road || a.pedestrian || a.footway || a.path;
-        const street = [a.house_number, road].filter(Boolean).join(' ');
-        const parts = [
-          street,
-          a.city || a.town || a.village || a.municipality || a.suburb,
-          a.state,
-          a.country
-        ].filter(Boolean);
-        const label = parts.length >= 2 ? parts.join(', ') : result.display_name;
+      predictions.slice(0, 6).forEach(p => {
+        const label = p.text.text;
         const item = document.createElement('div');
         item.className = 'autocomplete-item';
         item.textContent = label;
@@ -763,7 +789,13 @@ function fetchSuggestions(query, input, dropdown) {
       });
       dropdown.classList.remove('d-none');
     })
-    .catch(() => hideDropdown(dropdown));
+    .catch(err => {
+      // Log rather than swallow: a blocked provider, an expired key and a
+      // dropped connection otherwise all present as an empty dropdown, which
+      // makes an outage indistinguishable from a query with no matches.
+      console.warn('[autocomplete]', err);
+      hideDropdown(dropdown);
+    });
 }
 
 function hideDropdown(dropdown) {
@@ -813,23 +845,36 @@ function setupVoice(buttonId, inputId, confirmBarId, confirmTextId, confirmYesId
     btn.classList.add('resolving');
     btn.querySelector('i').className = 'fas fa-spinner fa-spin';
 
-    const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&q=${encodeURIComponent(transcript)}&limit=1&addressdetails=1`;
-    fetch(url, { headers: { 'Accept-Language': 'en' } })
-      .then(r => r.json())
+    // Resolve the transcript through the same Places autocomplete the typed
+    // path uses, taking the top prediction, so a dictated address resolves
+    // through the same provider as a typed one.
+    fetch('https://places.googleapis.com/v1/places:autocomplete', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Goog-Api-Key': MAPS_BROWSER_KEY,
+      },
+      body: JSON.stringify({ input: transcript })
+    })
+      .then(r => {
+        if (!r.ok) throw new Error(`Places autocomplete failed: HTTP ${r.status}`);
+        return r.json();
+      })
       .then(data => {
-        if (data && data.length) {
-          const a = data[0].address || {};
-          const road = a.road || a.pedestrian || a.footway || a.path;
-          const street = [a.house_number, road].filter(Boolean).join(' ');
-          const city = a.city || a.town || a.village || a.municipality || a.suburb;
-          const parts = [street, city, a.state, a.country].filter(Boolean);
-          // For city-only results (no street), just use city + state
-          input.value = parts.length >= 2 ? parts.join(', ') : data[0].display_name;
-        }
+        const top = (data.suggestions || [])
+          .map(s => s.placePrediction)
+          .find(p => p && p.text && p.text.text);
+        if (top) input.value = top.text.text;
         doneResolving();
         showConfirmBar(input.value);
       })
-      .catch(() => { doneResolving(); showConfirmBar(input.value); });
+      .catch(err => {
+        // Fall back to the raw transcript, which the confirm bar still shows
+        // for the user to accept or correct — but say why in the console.
+        console.warn('[voice autocomplete]', err);
+        doneResolving();
+        showConfirmBar(input.value);
+      });
   };
 
   function doneResolving() {
