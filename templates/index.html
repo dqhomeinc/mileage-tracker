@@ -648,6 +648,31 @@ function applyDefaultVehicle() {
   vehicleHintChange('tripVehicle', 'tripVehicleHint');
 }
 
+// Date and start time default to now, so logging a trip just after taking it —
+// the common case — needs no date or time entry at all. Like the default
+// vehicle, this only fills empty fields, so a restored draft or a value the
+// user already chose is never overwritten.
+//
+// Both are read fresh on every call rather than from the cached TODAY_ISO: the
+// page can sit open across midnight, and logging several trips in a row should
+// stamp each with the time it was actually logged, not when the page loaded.
+//
+// _userSet is set deliberately. getTimeValue() only submits a time the user is
+// taken to have chosen, so without it the form would display a start time that
+// silently never reached the saved trip. The end time is left empty on purpose:
+// it isn't known until the trip is over, and guessing it would put a wrong
+// duration into the feasibility check.
+function applyTripDateTimeDefaults() {
+  const dateEl = document.getElementById('tripDate');
+  if (dateEl && !dateEl.value) dateEl.value = localToday();
+
+  const timeEl = document.getElementById('tripStartTime');
+  if (timeEl && !timeEl.value) {
+    timeEl.value = localNowTime();
+    timeEl._userSet = true;
+  }
+}
+
 function vehicleHintChange(selectId, hintId) {
   const sel  = document.getElementById(selectId);
   const hint = document.getElementById(hintId);
@@ -1057,6 +1082,12 @@ function localToday() {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
+
+// Local wall-clock "HH:MM", matching what <input type="time"> expects.
+function localNowTime() {
+  const d = new Date();
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
 const TODAY_ISO = localToday();
 ['tripDate', 'editTripDate'].forEach(id => {
   const el = document.getElementById(id);
@@ -1184,6 +1215,9 @@ document.getElementById('logTripBtn').addEventListener('click', async () => {
     document.getElementById('tripDate').value      = '';
     initTimeInput('tripStartTime');
     initTimeInput('tripEndTime');
+    // Re-stamp after clearing, so a second trip logged back-to-back gets the
+    // time it is being logged at rather than the one just submitted.
+    applyTripDateTimeDefaults();
 
     if (data.distance_error) {
       showError(`Trip logged, but distance couldn't be calculated automatically (${data.distance_error}). You can add it later by editing the trip.`);
@@ -1555,6 +1589,10 @@ async function saveEdit() {
 setupAutocomplete('editStart', 'editStartDropdown');
 setupAutocomplete('editEnd',   'editEndDropdown');
 
+// Stamp date and start time before the draft is restored, so a draft's own
+// values still take precedence — same ordering as the default vehicle, which
+// loadVehicles() applies once the list arrives.
+applyTripDateTimeDefaults();
 loadVehicles().then(restoreTripDraft);
 loadHistory();
 
