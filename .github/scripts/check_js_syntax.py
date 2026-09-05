@@ -22,6 +22,7 @@ TEMPLATES_WITH_CONTEXT = {
     'index.html': {'username': 'tester', 'photo_data': None,
                    'maps_browser_key': 'test-browser-key'},
     'vehicles.html': {'username': 'tester', 'photo_data': None},
+    'businesses.html': {'username': 'tester', 'photo_data': None},
     'profile.html': {'username': 'tester', 'email': 't@example.com', 'photo_data': None},
 }
 

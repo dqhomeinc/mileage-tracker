@@ -423,6 +423,16 @@
         </select>
         <div class="vehicle-hint" id="tripVehicleHint"></div>
       </div>
+
+      <div style="margin-bottom:12px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+          <label class="field-label" for="tripBusiness" style="margin-bottom:0">Business</label>
+          <a href="/my-businesses" class="vehicle-add-link">+ Add</a>
+        </div>
+        <select id="tripBusiness" class="form-input business-select">
+          <option value="">— No business (optional) —</option>
+        </select>
+      </div>
       <div class="trip-extras-row">
         <div>
           <label class="field-label" for="tripDate">Trip Date</label>
@@ -535,6 +545,12 @@
         <option value="">— No vehicle (optional) —</option>
       </select>
       <div class="vehicle-hint" id="editVehicleHint"></div>
+    </div>
+    <div class="modal-field">
+      <label>Business</label>
+      <select id="editBusiness" class="business-select">
+        <option value="">— No business (optional) —</option>
+      </select>
     </div>
     <div class="modal-row-3">
       <div class="modal-field" style="margin-bottom:0">
@@ -673,6 +689,42 @@ function applyTripDateTimeDefaults() {
   }
 }
 
+let businessesList = [];
+
+async function loadBusinesses() {
+  try {
+    const resp = await fetch('/businesses');
+    businessesList = await resp.json();
+    populateBusinessSelects();
+  } catch { /* non-fatal */ }
+}
+
+function populateBusinessSelects() {
+  document.querySelectorAll('.business-select').forEach(sel => {
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">— No business (optional) —</option>';
+    businessesList.forEach(b => {
+      const opt = document.createElement('option');
+      opt.value = b.id;
+      opt.textContent = b.name;
+      sel.appendChild(opt);
+    });
+    sel.value = cur;
+  });
+  applyDefaultBusiness();
+}
+
+// Same rules as the default vehicle: fills the new-trip form only, only when
+// nothing is chosen, and never the edit modal — defaulting there would rewrite
+// which business an existing trip was attributed to on save.
+function applyDefaultBusiness() {
+  const sel = document.getElementById('tripBusiness');
+  if (!sel || sel.value) return;
+  const def = businessesList.find(b => b.is_default);
+  if (!def) return;
+  sel.value = def.id;
+}
+
 function vehicleHintChange(selectId, hintId) {
   const sel  = document.getElementById(selectId);
   const hint = document.getElementById(hintId);
@@ -694,6 +746,7 @@ function saveTripDraft() {
     start:     document.getElementById('start').value,
     end:       document.getElementById('end').value,
     vehicleId: document.getElementById('tripVehicle').value,
+    businessId: document.getElementById('tripBusiness').value,
     tripDate:  document.getElementById('tripDate').value,
     startTime: document.getElementById('tripStartTime').value,
     endTime:   document.getElementById('tripEndTime').value,
@@ -733,6 +786,7 @@ function restoreTripDraft() {
     document.getElementById('tripVehicle').value = draft.vehicleId;
     vehicleHintChange('tripVehicle', 'tripVehicleHint');
   }
+  if ('businessId' in draft) document.getElementById('tripBusiness').value = draft.businessId;
   if (draft.tripDate) document.getElementById('tripDate').value = draft.tripDate;
   [['tripStartTime', draft.startTime], ['tripEndTime', draft.endTime]].forEach(([id, val]) => {
     if (!val) return;
@@ -1181,11 +1235,13 @@ document.getElementById('logTripBtn').addEventListener('click', async () => {
   btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span> Logging…';
 
   const vehicleVal = document.getElementById('tripVehicle').value;
+  const businessVal = document.getElementById('tripBusiness').value;
   const payload = {
     start, end,
     start_place_id: selectedPlaceIds.start,
     end_place_id:   selectedPlaceIds.end,
     vehicle_id: vehicleVal ? parseInt(vehicleVal) : null,
+    business_id: businessVal ? parseInt(businessVal) : null,
     trip_date:  document.getElementById('tripDate').value      || null,
     start_time: getTimeValue('tripStartTime'),
     end_time:   getTimeValue('tripEndTime'),
@@ -1212,6 +1268,8 @@ document.getElementById('logTripBtn').addEventListener('click', async () => {
     document.getElementById('tripVehicle').value   = '';
     document.getElementById('tripVehicleHint').textContent = '';
     applyDefaultVehicle();
+    document.getElementById('tripBusiness').value = '';
+    applyDefaultBusiness();
     document.getElementById('tripDate').value      = '';
     initTimeInput('tripStartTime');
     initTimeInput('tripEndTime');
@@ -1308,6 +1366,8 @@ function prependTripRow(trip, prepend = true) {
   row.dataset.miles       = trip.miles ?? '';
   row.dataset.vehicleId   = trip.vehicle_id   || '';
   row.dataset.vehicleName = trip.vehicle_name || '';
+  row.dataset.businessId   = trip.business_id   || '';
+  row.dataset.businessName = trip.business_name || '';
   row.dataset.vehicleSub  = trip.vehicle_sub  || '';
   row.dataset.tripDate    = trip.trip_date    || '';
   row.dataset.startTime   = trip.start_time   || '';
@@ -1445,6 +1505,7 @@ function openEditModal(id) {
   setLocationText(document.getElementById('editEnd'),   row.dataset.end);
   document.getElementById('editMiles').textContent = editingTrip.miles != null ? editingTrip.miles : 'Pending';
 
+  document.getElementById('editBusiness').value = row.dataset.businessId || '';
   const vehicleSel = document.getElementById('editVehicle');
   vehicleSel.value = row.dataset.vehicleId || '';
   const selOpt = vehicleSel.options[vehicleSel.selectedIndex];
@@ -1554,11 +1615,13 @@ async function saveEdit() {
   }
 
   const vehicleVal = document.getElementById('editVehicle').value;
+  const businessVal = document.getElementById('editBusiness').value;
   const payload = {
     start, end, distance_miles: editingTrip.miles,
     ...placeIdsForEdit(start, end),
     duration_seconds: editingTrip.durationSeconds,
     vehicle_id: vehicleVal ? parseInt(vehicleVal) : null,
+    business_id: businessVal ? parseInt(businessVal) : null,
     trip_date:  document.getElementById('editTripDate').value  || null,
     start_time: getTimeValue('editStartTime'),
     end_time:   getTimeValue('editEndTime'),
@@ -1593,7 +1656,10 @@ setupAutocomplete('editEnd',   'editEndDropdown');
 // values still take precedence — same ordering as the default vehicle, which
 // loadVehicles() applies once the list arrives.
 applyTripDateTimeDefaults();
-loadVehicles().then(restoreTripDraft);
+// Restore the draft only once BOTH lists are in. Each load applies its own
+// default when it resolves, so restoring earlier would let a late-arriving
+// list overwrite a value the draft had deliberately cleared.
+Promise.all([loadVehicles(), loadBusinesses()]).then(restoreTripDraft);
 loadHistory();
 
 
@@ -1626,16 +1692,25 @@ function yearRowBlock(group) {
     rows.push([]);
   }
 
-  rows.push(['Start Location', 'End Location', 'Miles', 'Vehicle', 'Trip Date', 'Start Time', 'End Time', 'Logged At']);
+  const businessRows = businessSummary(group.trips);
+  if (businessRows.length) {
+    rows.push(['By Business']);
+    rows.push(['Business', 'Trips', 'Miles']);
+    businessRows.forEach(b => rows.push([b.name, b.trips, round2(b.miles)]));
+    rows.push([]);
+  }
+
+  rows.push(['Start Location', 'End Location', 'Miles', 'Vehicle', 'Business', 'Trip Date', 'Start Time', 'End Time', 'Logged At']);
   group.trips.forEach(t => rows.push([
     t.start, t.end, t.miles ?? '',
-    t.vehicle_name || '',
+    t.vehicle_name  || '',
+    t.business_name || '',
     t.trip_date    || '',
     t.start_time   || '',
     t.end_time     || '',
     t.timestamp
   ]));
-  rows.push(['', 'TOTAL', round2(yearMiles), '', '', '', '', '']);
+  rows.push(['', 'TOTAL', round2(yearMiles), '', '', '', '', '', '']);
   return rows;
 }
 
@@ -1666,7 +1741,7 @@ function exportExcel() {
     rows.push(...yearRowBlock(group));
 
     const ws = XLSX.utils.aoa_to_sheet(rows);
-    ws['!cols'] = [{ wch: 34 }, { wch: 34 }, { wch: 8 }, { wch: 18 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 22 }];
+    ws['!cols'] = [{ wch: 34 }, { wch: 34 }, { wch: 8 }, { wch: 18 }, { wch: 18 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 22 }];
     const sheetName = group.year === 'Unknown' ? 'Unknown Year' : group.year;
     XLSX.utils.book_append_sheet(wb, ws, sheetName);
   });
@@ -1677,6 +1752,11 @@ function exportExcel() {
 // Trips are grouped by year for the PDF export (one page per year). A trip's
 // year comes from its trip_date when set, else the year embedded in its
 // "MMM DD, YYYY h:mm AM/PM" logged-at timestamp string.
+function businessSummary(trips) {
+  if (!trips.some(t => t.business_name)) return [];
+  return groupSummary(trips, t => t.business_name || 'No business');
+}
+
 function tripYear(t) {
   if (t.trip_date) return t.trip_date.slice(0, 4);
   const m = (t.timestamp || '').match(/,\s*(\d{4})/);
@@ -1704,9 +1784,14 @@ function groupTripsByYear(trips) {
 // useful to break down.
 function vehicleSummary(trips) {
   if (!trips.some(t => t.vehicle_name)) return [];
+  return groupSummary(trips, t => t.vehicle_name || 'No vehicle');
+}
+
+// Trips grouped by a label, with trip count and miles, ordered by miles.
+function groupSummary(trips, labelOf) {
   const map = new Map();
   trips.forEach(t => {
-    const name = t.vehicle_name || 'No vehicle';
+    const name = labelOf(t);
     if (!map.has(name)) map.set(name, { trips: 0, miles: 0 });
     const entry = map.get(name);
     entry.trips += 1;
@@ -1770,17 +1855,39 @@ function exportPDF() {
       tableStartY = doc.lastAutoTable.finalY + 6;
     }
 
+    const businessRows = businessSummary(group.trips);
+    if (businessRows.length) {
+      doc.setFontSize(8);
+      doc.setTextColor(30, 41, 59);
+      doc.text('By Business', 14, tableStartY);
+      tableStartY += 3;
+
+      doc.autoTable({
+        startY: tableStartY,
+        head: [['Business', 'Trips', 'Miles']],
+        body: businessRows.map(b => [b.name, b.trips, Math.round(b.miles * 100) / 100]),
+        theme: 'plain',
+        styles: { fontSize: 7, cellPadding: 1 },
+        headStyles: { fontStyle: 'bold', textColor: [100, 116, 139] },
+        columnStyles: { 1: { halign: 'right' }, 2: { halign: 'right' } },
+        tableWidth: 90,
+        margin: { left: 14, right: 14 },
+      });
+      tableStartY = doc.lastAutoTable.finalY + 6;
+    }
+
     doc.autoTable({
       startY: tableStartY,
-      head: [['Start Location', 'End Location', 'Miles', 'Vehicle', 'Trip Date', 'Start Time', 'End Time']],
+      head: [['Start Location', 'End Location', 'Miles', 'Vehicle', 'Business', 'Trip Date', 'Start Time', 'End Time']],
       body: group.trips.map(t => [
         t.start, t.end, t.miles ?? '',
-        t.vehicle_name || '',
+        t.vehicle_name  || '',
+        t.business_name || '',
         t.trip_date    || '',
         t.start_time   || '',
         t.end_time     || ''
       ]),
-      foot: [['', 'Total', Math.round(yearMiles * 100) / 100, '', '', '', '']],
+      foot: [['', 'Total', Math.round(yearMiles * 100) / 100, '', '', '', '', '']],
       headStyles:  { fillColor: [79, 70, 229], fontSize: 7, fontStyle: 'bold' },
       footStyles:  { fillColor: [238, 242, 255], textColor: [79, 70, 229], fontStyle: 'bold', fontSize: 7 },
       bodyStyles:  { fontSize: 7 },
