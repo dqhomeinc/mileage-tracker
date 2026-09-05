@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>My Businesses — Mileage Tracker</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+  <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
+  <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+  <link rel="manifest" href="/static/manifest.json">
+  <meta name="theme-color" content="#4F46E5">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  <style>
+    :root {
+      --primary:    #4F46E5;
+      --violet:     #7C3AED;
+      --grad:       linear-gradient(135deg, #4F46E5 0%, #7C3AED 100%);
+      --bg:         #F1F5F9;
+      --surface:    #FFFFFF;
+      --text:       #0F172A;
+      --muted:      #64748B;
+      --border:     #E2E8F0;
+      --radius:     16px;
+      --radius-sm:  10px;
+      --shadow:     0 1px 3px rgba(0,0,0,.06), 0 4px 16px rgba(79,70,229,.08);
+    }
+    *, *::before, *::after { box-sizing: border-box; }
+    body {
+      font-family: 'Inter', system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+
+    .page { max-width: 680px; margin: 0 auto; padding: 32px 16px 56px; }
+    .panel {
+      background: var(--surface);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 28px;
+      margin-bottom: 20px;
+    }
+    .panel-heading {
+      display: flex; align-items: center; gap: 10px;
+      font-size: 1rem; font-weight: 600; color: var(--text);
+      margin-bottom: 22px;
+    }
+    .panel-heading-icon {
+      width: 32px; height: 32px; border-radius: 8px;
+      background: linear-gradient(135deg, #EEF2FF, #DDD6FE);
+      display: flex; align-items: center; justify-content: center;
+      color: var(--primary); font-size: 0.8rem;
+    }
+
+    /* ── Business management panel ────────────── */
+    .businesses-empty { text-align: center; padding: 18px 0; color: var(--muted); font-size: .85rem; }
+    .business-list { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
+    .business-item {
+      display: flex; align-items: center; gap: 12px;
+      padding: 10px 14px; border: 1.5px solid var(--border);
+      border-radius: var(--radius-sm); background: #FAFBFD;
+    }
+    .business-info { flex: 1; min-width: 0; }
+    .business-name { font-weight: 600; font-size: .88rem; color: var(--text); }
+    .business-actions { display: flex; gap: 4px; flex-shrink: 0; }
+    .business-edit, .business-del {
+      width: 28px; height: 28px; border-radius: 6px; flex-shrink: 0;
+      background: transparent; border: none; color: #CBD5E1;
+      cursor: pointer; display: flex; align-items: center; justify-content: center;
+      font-size: .75rem; transition: all .2s;
+    }
+    .business-edit:hover { background: #EEF2FF; color: var(--primary); }
+    .business-del:hover { background: #FEF2F2; color: #EF4444; }
+    .business-star {
+      width: 28px; height: 28px; border-radius: 6px; flex-shrink: 0;
+      background: transparent; border: none; color: #CBD5E1;
+      cursor: pointer; display: flex; align-items: center; justify-content: center;
+      font-size: .75rem; transition: all .2s;
+    }
+    .business-star:hover { background: #FFFBEB; color: #F59E0B; }
+    .business-star.is-default { color: #F59E0B; }
+    .business-default-badge {
+      display: inline-block; margin-left: 6px; padding: 1px 6px;
+      border-radius: 999px; background: #FFFBEB; color: #B45309;
+      font-size: .65rem; font-weight: 700; letter-spacing: .02em;
+      vertical-align: middle;
+    }
+    .btn-add-business {
+      padding: 5px 12px; border-radius: 8px; white-space: nowrap;
+      border: 1.5px dashed var(--border); background: transparent;
+      color: var(--muted); font-size: .8rem; font-weight: 600;
+      font-family: 'Inter', sans-serif; cursor: pointer;
+      display: flex; align-items: center; gap: 5px; transition: all .2s;
+    }
+    .btn-add-business:hover { border-color: var(--primary); color: var(--primary); background: #EEF2FF; }
+    .business-add-form {
+      margin-top: 14px; padding: 14px;
+      border: 1.5px solid #C7D2FE; border-radius: var(--radius-sm);
+      background: #EEF2FF; display: none;
+    }
+    .business-add-form.show { display: block; }
+    .v-form-row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-bottom: 10px; }
+    .v-form-full { margin-bottom: 10px; }
+    .v-form-input {
+      width: 100%; padding: 9px 12px;
+      border: 1.5px solid var(--border); border-radius: 8px;
+      font-family: 'Inter', sans-serif; font-size: .85rem; color: var(--text);
+      outline: none; background: white; transition: border-color .2s;
+    }
+    .v-form-input:focus { border-color: var(--primary); }
+    .v-form-footer { display: flex; gap: 8px; justify-content: flex-end; margin-top: 4px; }
+    .v-form-error { font-size: .78rem; color: #EF4444; margin-top: 6px; display: none; }
+    .v-form-error.show { display: block; }
+    .field-label {
+      display: block; font-size: 0.74rem; font-weight: 600;
+      color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em;
+      margin-bottom: 6px;
+    }
+    .btn-modal-cancel {
+      padding: 10px 18px; border-radius: var(--radius-sm);
+      border: 1.5px solid var(--border); background: white;
+      color: var(--muted); font-size: .88rem; font-weight: 600;
+      cursor: pointer; font-family: 'Inter', sans-serif; transition: background .15s;
+    }
+    .btn-modal-cancel:hover { background: var(--bg); }
+    .btn-modal-save {
+      padding: 10px 20px; border-radius: var(--radius-sm);
+      background: var(--grad); border: none; color: white;
+      font-size: .88rem; font-weight: 600; cursor: pointer;
+      font-family: 'Inter', sans-serif; transition: opacity .15s;
+    }
+    .btn-modal-save:hover { opacity: .9; }
+    .btn-modal-save:disabled { opacity: .6; cursor: not-allowed; }
+
+    @media (max-width: 480px) {
+      .v-form-row { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+{% include '_navbar.html' %}
+
+<div class="page">
+
+  <div class="panel">
+    <div style="display:flex;align-items:center;justify-content:space-between">
+      <div class="panel-heading" style="margin-bottom:0">
+        <div class="panel-heading-icon"><i class="fas fa-car"></i></div>
+        My Businesss
+      </div>
+      <button class="btn-add-business" id="showBusinessFormBtn" onclick="toggleBusinessForm()">
+        <i class="fas fa-plus"></i> Add Business
+      </button>
+    </div>
+
+    <div class="business-add-form" id="businessAddForm">
+      <div class="v-form-full">
+        <label class="field-label" for="businessName">Business name</label>
+        <input type="text" id="businessName" class="v-form-input" placeholder="e.g. Acme Consulting, Side Project LLC">
+      </div>
+      <div class="v-form-error" id="businessFormError"></div>
+      <div class="v-form-footer">
+        <button class="btn-modal-cancel" onclick="hideBusinessForm()">Cancel</button>
+        <button class="btn-modal-save" id="addBusinessBtn" onclick="saveBusiness()">Add Business</button>
+      </div>
+    </div>
+
+    <div class="business-list" id="businessList">
+      <div class="businesses-empty" id="businessesEmpty">No businesses yet. Add one to attribute trips to a business.</div>
+    </div>
+  </div>
+
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+let businessesList = [];
+let editingBusinessId = null;
+
+async function loadBusinesses() {
+  try {
+    const resp = await fetch('/businesses');
+    businessesList = await resp.json();
+    renderBusinessList();
+  } catch { /* non-fatal */ }
+}
+
+function renderBusinessList() {
+  const listEl  = document.getElementById('businessList');
+  const emptyEl = document.getElementById('businessesEmpty');
+  listEl.querySelectorAll('.business-item').forEach(el => el.remove());
+  if (!businessesList.length) { emptyEl.style.display = ''; return; }
+  emptyEl.style.display = 'none';
+  businessesList.forEach(v => {
+    const item = document.createElement('div');
+    item.className = 'business-item';
+    item.id = `business-${v.id}`;
+    item.innerHTML = `
+      <div class="business-info">
+        <div class="business-name">${escHtml(v.name)}${
+          v.is_default ? '<span class="business-default-badge">DEFAULT</span>' : ''}</div>
+      </div>
+      <div class="business-actions">
+        <button class="business-star${v.is_default ? ' is-default' : ''}"
+                onclick="toggleDefaultBusiness(${v.id})"
+                title="${v.is_default ? 'Remove as default business' : 'Set as default business'}"
+                aria-pressed="${v.is_default ? 'true' : 'false'}">
+          <i class="fa${v.is_default ? 's' : 'r'} fa-star"></i>
+        </button>
+        <button class="business-edit" onclick="editBusiness(${v.id})" title="Edit business">
+          <i class="fas fa-pen"></i>
+        </button>
+        <button class="business-del" onclick="deleteBusiness(${v.id})" title="Remove business">
+          <i class="fas fa-trash-alt"></i>
+        </button>
+      </div>`;
+    listEl.appendChild(item);
+  });
+}
+
+function toggleBusinessForm() {
+  const form = document.getElementById('businessAddForm');
+  const willShow = !form.classList.contains('show');
+  if (willShow) {
+    editingBusinessId = null;
+    document.getElementById('addBusinessBtn').textContent = 'Add Business';
+    ['businessName'].forEach(id => {
+      document.getElementById(id).value = '';
+    });
+  }
+  form.classList.toggle('show', willShow);
+  if (willShow) document.getElementById('businessName').focus();
+}
+
+function hideBusinessForm() {
+  document.getElementById('businessAddForm').classList.remove('show');
+  ['businessName'].forEach(id => {
+    document.getElementById(id).value = '';
+  });
+  const errEl = document.getElementById('businessFormError');
+  errEl.textContent = '';
+  errEl.classList.remove('show');
+  editingBusinessId = null;
+  document.getElementById('addBusinessBtn').textContent = 'Add Business';
+}
+
+function editBusiness(id) {
+  const v = businessesList.find(v => v.id === id);
+  if (!v) return;
+  editingBusinessId = id;
+  document.getElementById('businessName').value  = v.name  || '';
+  const errEl = document.getElementById('businessFormError');
+  errEl.textContent = '';
+  errEl.classList.remove('show');
+  document.getElementById('addBusinessBtn').textContent = 'Save Changes';
+  document.getElementById('businessAddForm').classList.add('show');
+  document.getElementById('businessName').focus();
+}
+
+async function saveBusiness() {
+  const name  = document.getElementById('businessName').value.trim();
+  const errEl = document.getElementById('businessFormError');
+  errEl.classList.remove('show');
+
+  if (!name) {
+    errEl.textContent = 'Business name is required.';
+    errEl.classList.add('show');
+    document.getElementById('businessName').focus();
+    return;
+  }
+
+  const isEdit = editingBusinessId !== null;
+  const btn = document.getElementById('addBusinessBtn');
+  btn.disabled = true;
+  btn.textContent = isEdit ? 'Saving…' : 'Adding…';
+  try {
+    const resp = await fetch(isEdit ? `/businesses/${editingBusinessId}` : '/businesses', {
+      method: isEdit ? 'PATCH' : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name })
+    });
+    const data = await resp.json();
+    if (!resp.ok) {
+      errEl.textContent = data.error || `Failed to ${isEdit ? 'save' : 'add'} business.`;
+      errEl.classList.add('show');
+      return;
+    }
+    if (isEdit) {
+      const idx = businessesList.findIndex(v => v.id === editingBusinessId);
+      if (idx !== -1) businessesList[idx] = data;
+    } else {
+      businessesList.push(data);
+    }
+    businessesList.sort((a, b) => a.name.localeCompare(b.name));
+    renderBusinessList();
+    hideBusinessForm();
+  } catch {
+    errEl.textContent = `Network error. Could not ${isEdit ? 'save' : 'add'} business.`;
+    errEl.classList.add('show');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = isEdit ? 'Save Changes' : 'Add Business';
+  }
+}
+
+async function deleteBusiness(id) {
+  if (!confirm('Remove this business? Trips using it will have the business cleared.')) return;
+  try {
+    const resp = await fetch(`/businesses/${id}`, { method: 'DELETE' });
+    if (!resp.ok) return;
+    businessesList = businessesList.filter(v => v.id !== id);
+    document.getElementById(`business-${id}`)?.remove();
+    if (!businessesList.length) document.getElementById('businessesEmpty').style.display = '';
+  } catch { /* silent */ }
+}
+
+// Star toggles the default: starring an unstarred business makes it the default,
+// starring the current default clears it (business stays optional on a trip).
+async function toggleDefaultBusiness(id) {
+  const wasDefault = businessesList.find(v => v.id === id)?.is_default;
+  try {
+    const resp = await fetch('/businesses/default', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ business_id: wasDefault ? null : id })
+    });
+    if (!resp.ok) return;
+    const data = await resp.json();
+    // Re-derive every flag from the id the server reports rather than flipping
+    // the one that was clicked, so the list can't end up showing two defaults
+    // if this tab's copy was stale.
+    businessesList.forEach(v => { v.is_default = v.id === data.default_business_id; });
+    renderBusinessList();
+  } catch { /* silent */ }
+}
+
+function escHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+loadBusinesses();
+</script>
+</body>
+</html>

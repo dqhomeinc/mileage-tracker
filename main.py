@@ -84,8 +84,13 @@ class User(UserMixin, db.Model):
     # in _migrate_db() can't add a constraint. Ownership is checked in the route
     # and delete_vehicle() clears it, so a stale id can't outlive its vehicle.
     default_vehicle_id = db.Column(db.Integer, nullable=True)
+    # The business preselected when logging a new trip. Same reasoning as
+    # default_vehicle_id above: a scalar here rather than a flag per row, so
+    # only one business can be the default by construction.
+    default_business_id = db.Column(db.Integer, nullable=True)
     trips    = db.relationship('Trip', backref='user', lazy=True, cascade='all, delete-orphan')
     vehicles = db.relationship('Vehicle', backref='owner', lazy=True, cascade='all, delete-orphan')
+    businesses = db.relationship('Business', backref='owner', lazy=True, cascade='all, delete-orphan')
 
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)
@@ -104,6 +109,18 @@ class Vehicle(db.Model):
     trips   = db.relationship('Trip', backref='vehicle', lazy=True)
 
 
+class Business(db.Model):
+    """A business a trip's mileage is attributed to.
+
+    Only a name: unlike Vehicle there is no year/make/model to describe, and a
+    mileage log needs the attribution, not a company record.
+    """
+    id      = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    name    = db.Column(db.String(100), nullable=False)
+    trips   = db.relationship('Trip', backref='business', lazy=True)
+
+
 class Trip(db.Model):
     id             = db.Column(db.Integer, primary_key=True)
     user_id        = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
@@ -112,6 +129,7 @@ class Trip(db.Model):
     distance_miles = db.Column(db.Float, nullable=True)
     timestamp      = db.Column(db.DateTime, server_default=db.func.now())
     vehicle_id     = db.Column(db.Integer, db.ForeignKey('vehicle.id'), nullable=True)
+    business_id    = db.Column(db.Integer, db.ForeignKey('business.id'), nullable=True)
     trip_date      = db.Column(db.String(10), nullable=True)
     start_time     = db.Column(db.String(5),  nullable=True)
     end_time       = db.Column(db.String(5),  nullable=True)
@@ -140,7 +158,12 @@ def _vehicle_dict(v):
             'is_default': v.id == current_user.default_vehicle_id}
 
 
-def _trip_dict(trip, vehicle_name=None, vehicle_sub=None):
+def _business_dict(b):
+    return {'id': b.id, 'name': b.name,
+            'is_default': b.id == current_user.default_business_id}
+
+
+def _trip_dict(trip, vehicle_name=None, vehicle_sub=None, business_name=None):
     return {
         'id':           trip.id,
         'start':        trip.start_location,
@@ -150,6 +173,8 @@ def _trip_dict(trip, vehicle_name=None, vehicle_sub=None):
         'vehicle_id':   trip.vehicle_id,
         'vehicle_name': vehicle_name,
         'vehicle_sub':  vehicle_sub,
+        'business_id':   trip.business_id,
+        'business_name': business_name,
         'trip_date':    trip.trip_date,
         'start_time':   trip.start_time,
         'end_time':     trip.end_time,
@@ -177,6 +202,7 @@ def _migrate_db():
             notnull = {row[1]: row[3] for row in info}
             additions = [
                 ('vehicle_id', 'INTEGER'),
+                ('business_id', 'INTEGER'),
                 ('trip_date',  'VARCHAR(10)'),
                 ('start_time', 'VARCHAR(5)'),
                 ('end_time',   'VARCHAR(5)'),
@@ -203,6 +229,7 @@ def _migrate_db():
             existing = set(columns)
             additions = [
                 ('vehicle_id', 'INTEGER'),
+                ('business_id', 'INTEGER'),
                 ('trip_date',  'VARCHAR(10)'),
                 ('start_time', 'VARCHAR(5)'),
                 ('end_time',   'VARCHAR(5)'),
@@ -229,6 +256,8 @@ def _migrate_db():
             conn.execute(db.text('ALTER TABLE "user" ADD COLUMN photo_data TEXT'))
         if 'default_vehicle_id' not in existing_user_cols:
             conn.execute(db.text('ALTER TABLE "user" ADD COLUMN default_vehicle_id INTEGER'))
+        if 'default_business_id' not in existing_user_cols:
+            conn.execute(db.text('ALTER TABLE "user" ADD COLUMN default_business_id INTEGER'))
 
         conn.commit()
 
@@ -659,6 +688,19 @@ def calculate():
     })
 
 
+def _resolve_business(business_id):
+    """(id, name) for a business the current user owns, else (None, None).
+
+    Scoped to the owner so a trip can't be attributed to another user's
+    business by passing its id. An unknown id drops the attribution rather
+    than failing the trip, matching how an unknown vehicle id is handled.
+    """
+    if not business_id:
+        return None, None
+    b = Business.query.filter_by(id=int(business_id), user_id=current_user.id).first()
+    return (b.id, b.name) if b else (None, None)
+
+
 @app.route('/log', methods=['POST'])
 @login_required
 def log_trip():
@@ -706,6 +748,8 @@ def log_trip():
         else:
             vehicle_id = None
 
+    business_id, business_name = _resolve_business(data.get('business_id'))
+
     warning = None
     if distance_miles is not None:
         warning = check_trip_feasibility(start_time, end_time, distance_miles, duration_seconds)
@@ -716,6 +760,7 @@ def log_trip():
         end_location=end,
         distance_miles=distance_miles,
         vehicle_id=vehicle_id,
+        business_id=business_id,
         trip_date=trip_date,
         start_time=start_time,
         end_time=end_time,
@@ -725,7 +770,7 @@ def log_trip():
     )
     db.session.add(trip)
     db.session.commit()
-    resp = {'success': True, 'trip': _trip_dict(trip, vehicle_name, vehicle_sub)}
+    resp = {'success': True, 'trip': _trip_dict(trip, vehicle_name, vehicle_sub, business_name)}
     if warning:
         resp['warning'] = warning
     if distance_error:
@@ -749,7 +794,8 @@ def history():
         _trip_dict(
             t,
             t.vehicle.name if t.vehicle else None,
-            ' '.join(filter(None, [t.vehicle.year, t.vehicle.make, t.vehicle.model])) if t.vehicle else None
+            ' '.join(filter(None, [t.vehicle.year, t.vehicle.make, t.vehicle.model])) if t.vehicle else None,
+            t.business.name if t.business else None
         )
         for t in trips
     ])
@@ -788,6 +834,8 @@ def update_trip(trip_id):
         else:
             vehicle_id = None
 
+    business_id, business_name = _resolve_business(data.get('business_id'))
+
     # Fall back to the trip's already-stored duration when the client didn't
     # send a fresh one (i.e. the route wasn't recalculated this edit).
     duration_seconds = data.get('duration_seconds') or trip.duration_seconds
@@ -805,12 +853,13 @@ def update_trip(trip_id):
     trip.end_location   = end
     trip.distance_miles = distance_miles
     trip.vehicle_id     = vehicle_id
+    trip.business_id    = business_id
     trip.trip_date      = trip_date
     trip.start_time     = start_time
     trip.end_time       = end_time
     trip.duration_seconds = duration_seconds
     db.session.commit()
-    resp = _trip_dict(trip, vehicle_name, vehicle_sub)
+    resp = _trip_dict(trip, vehicle_name, vehicle_sub, business_name)
     if warning:
         resp['warning'] = warning
     return jsonify(resp)
@@ -937,6 +986,105 @@ def set_default_vehicle():
 @login_required
 def vehicles_page():
     return render_template('vehicles.html', username=current_user.username, photo_data=current_user.photo_data)
+
+
+# ---------------------------------------------------------------------------
+# Business routes
+# ---------------------------------------------------------------------------
+# Mirrors the vehicle routes, including the single-default model: the default
+# lives as a scalar on User, is never set implicitly, and is cleared when the
+# business it points at is deleted.
+
+@app.route('/businesses', methods=['GET'])
+@login_required
+def get_businesses():
+    bs = Business.query.filter_by(user_id=current_user.id).order_by(Business.name).all()
+    return jsonify([_business_dict(b) for b in bs])
+
+
+@app.route('/businesses', methods=['POST'])
+@login_required
+def create_business():
+    data = request.get_json()
+    name = (data.get('name') or '').strip()
+    if not name:
+        return jsonify({'error': 'Business name is required.'}), 400
+    existing = Business.query.filter(
+        Business.user_id == current_user.id,
+        db.func.lower(Business.name) == name.lower()
+    ).first()
+    if existing:
+        return jsonify({'error': f'You already have a business named "{name}".'}), 409
+    b = Business(user_id=current_user.id, name=name)
+    # Adding a business never makes it the default, not even the first one.
+    db.session.add(b)
+    db.session.commit()
+    return jsonify(_business_dict(b)), 201
+
+
+@app.route('/businesses/<int:business_id>', methods=['PATCH'])
+@login_required
+def update_business(business_id):
+    b = Business.query.filter_by(id=business_id, user_id=current_user.id).first()
+    if not b:
+        return jsonify({'error': 'Business not found.'}), 404
+    data = request.get_json()
+    name = (data.get('name') or '').strip()
+    if not name:
+        return jsonify({'error': 'Business name is required.'}), 400
+    existing = Business.query.filter(
+        Business.user_id == current_user.id,
+        db.func.lower(Business.name) == name.lower(),
+        Business.id != business_id
+    ).first()
+    if existing:
+        return jsonify({'error': f'You already have a business named "{name}".'}), 409
+    b.name = name
+    db.session.commit()
+    return jsonify(_business_dict(b))
+
+
+@app.route('/businesses/<int:business_id>', methods=['DELETE'])
+@login_required
+def delete_business(business_id):
+    b = Business.query.filter_by(id=business_id, user_id=current_user.id).first()
+    if not b:
+        return jsonify({'error': 'Business not found.'}), 404
+    # Unlink the trips and drop the default in the same commit as the delete,
+    # so no id can outlive the row it points at.
+    Trip.query.filter_by(business_id=business_id).update({'business_id': None})
+    if current_user.default_business_id == business_id:
+        current_user.default_business_id = None
+    db.session.delete(b)
+    db.session.commit()
+    return jsonify({'success': True})
+
+
+@app.route('/businesses/default', methods=['PUT'])
+@login_required
+def set_default_business():
+    """Set or clear the business preselected when logging a new trip."""
+    data = request.get_json() or {}
+    business_id = data.get('business_id')
+
+    if business_id is None:
+        current_user.default_business_id = None
+        db.session.commit()
+        return jsonify({'default_business_id': None})
+
+    b = Business.query.filter_by(id=int(business_id), user_id=current_user.id).first()
+    if not b:
+        return jsonify({'error': 'Business not found.'}), 404
+    current_user.default_business_id = b.id
+    db.session.commit()
+    return jsonify({'default_business_id': b.id})
+
+
+@app.route('/my-businesses')
+@login_required
+def businesses_page():
+    return render_template('businesses.html', username=current_user.username,
+                           photo_data=current_user.photo_data)
 
 
 # ---------------------------------------------------------------------------
