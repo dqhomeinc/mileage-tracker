@@ -250,10 +250,26 @@
     .modal-box {
       background: white; border-radius: var(--radius);
       box-shadow: 0 20px 60px rgba(0,0,0,.2);
-      width: 100%; max-width: 540px; padding: 28px;
+      width: 100%; max-width: 540px;
+      /* Never taller than the viewport, less the overlay's 16px padding each
+         side. The overlay is position:fixed and centres its child, so without
+         this cap a modal taller than the window overflows in both directions
+         and its top — the close button included — sits above the viewport
+         where nothing can scroll it into reach.
+
+         Laid out as a column so the header and footer stay put and only the
+         fields scroll, keeping Save and Cancel reachable without scrolling to
+         the bottom. Padding moves onto the three sections so the scrollbar
+         tracks the edge of the box rather than floating inside the padding. */
+      max-height: calc(100vh - 32px);
+      display: flex; flex-direction: column;
     }
     .modal-header {
-      display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 28px 28px 0; margin-bottom: 20px; flex-shrink: 0;
+    }
+    .modal-body {
+      padding: 0 28px; overflow-y: auto; flex: 1 1 auto;
     }
     .modal-title { font-size: 1.05rem; font-weight: 700; color: var(--text); display: flex; align-items: center; gap: 8px; }
     .modal-close {
@@ -286,7 +302,10 @@
     }
     .btn-recalc:hover { border-color: var(--primary); color: var(--primary); }
     .btn-recalc:disabled { opacity: .6; cursor: not-allowed; }
-    .modal-footer { display: flex; gap: 10px; justify-content: flex-end; }
+    .modal-footer {
+      display: flex; gap: 10px; justify-content: flex-end;
+      padding: 20px 28px 28px; flex-shrink: 0;
+    }
     .btn-modal-cancel {
       padding: 10px 18px; border-radius: var(--radius-sm);
       border: 1.5px solid var(--border); background: white;
@@ -533,6 +552,7 @@
       <div class="modal-title"><i class="fas fa-pencil-alt" style="color:var(--primary)"></i> Edit Trip</div>
       <button class="modal-close" onclick="closeEditModal()"><i class="fas fa-times"></i></button>
     </div>
+    <div class="modal-body">
     <div class="modal-field">
       <label>Start Location</label>
       <div class="autocomplete-wrapper">
@@ -590,6 +610,7 @@
     <div class="speed-warning" id="editSpeedWarning">
       <i class="fas fa-triangle-exclamation"></i>
       <span id="editSpeedWarningText"></span>
+    </div>
     </div>
     <div class="modal-footer">
       <button class="btn-modal-cancel" onclick="closeEditModal()">Cancel</button>
@@ -962,6 +983,7 @@ function fetchSuggestions(query, input, dropdown) {
         dropdown.appendChild(item);
       });
       dropdown.classList.remove('d-none');
+      fitDropdownToScroller(dropdown);
     })
     .catch(err => {
       // Log rather than swallow: a blocked provider, an expired key and a
@@ -972,9 +994,33 @@ function fetchSuggestions(query, input, dropdown) {
     });
 }
 
+// The edit modal's fields scroll, and a scroll container clips absolutely
+// positioned descendants — this dropdown included, since its containing block
+// (.autocomplete-wrapper) sits inside it. Fit the list to the room actually
+// below the input, then nudge the container if it still overhangs, so
+// suggestions are never cut off. Measured rather than assumed because the room
+// depends on the window height: at a half-screen 1080p window the End Location
+// list would otherwise be clipped. A no-op on the main form, which has no
+// scrolling ancestor.
+const DROPDOWN_MAX_H = 210;  // matches .autocomplete-dropdown's CSS max-height
+const DROPDOWN_MIN_H = 96;   // still shows a usable list in a very short window
+
+function fitDropdownToScroller(dropdown) {
+  const scroller = dropdown.closest('.modal-body');
+  if (!scroller) { dropdown.style.maxHeight = ''; return; }
+  const room = scroller.getBoundingClientRect().bottom
+             - dropdown.getBoundingClientRect().top - 8;
+  dropdown.style.maxHeight =
+    `${Math.max(DROPDOWN_MIN_H, Math.min(DROPDOWN_MAX_H, room))}px`;
+  const overhang = dropdown.getBoundingClientRect().bottom
+                 - scroller.getBoundingClientRect().bottom;
+  if (overhang > 0) scroller.scrollTop += overhang + 8;
+}
+
 function hideDropdown(dropdown) {
   dropdown.classList.add('d-none');
   dropdown.innerHTML = '';
+  dropdown.style.maxHeight = '';
 }
 
 setupAutocomplete('start', 'startDropdown');
