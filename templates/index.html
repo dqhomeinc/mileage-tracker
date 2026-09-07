@@ -1763,6 +1763,25 @@ function tripYear(t) {
   return m ? m[1] : 'Unknown';
 }
 
+// Trips grouped by business name for the PDF sections. Trips with no business
+// are kept in a trailing "No business" group rather than dropped: they are
+// still deductible mileage and must appear in the year's total.
+function groupTripsByBusiness(trips) {
+  const groups = new Map();
+  trips.forEach(t => {
+    const name = t.business_name || 'No business';
+    if (!groups.has(name)) groups.set(name, []);
+    groups.get(name).push(t);
+  });
+  return [...groups.entries()]
+    .map(([name, ts]) => ({ name, trips: ts }))
+    .sort((a, b) => {
+      if (a.name === 'No business') return 1;
+      if (b.name === 'No business') return -1;
+      return a.name.localeCompare(b.name);
+    });
+}
+
 function groupTripsByYear(trips) {
   const groups = new Map();
   trips.forEach(t => {
@@ -1801,6 +1820,25 @@ function groupSummary(trips, labelOf) {
     .map(([name, v]) => ({ name, ...v }))
     .sort((a, b) => b.miles - a.miles);
 }
+
+// Explicit widths for every trip table on a year page, in mm. autoTable sizes
+// columns from each table's own content, and each business section is its own
+// call, so without a shared spec a section with long addresses would place its
+// columns differently from one with short addresses, and the year-total row —
+// which has almost no content to size from — would land its label and figure
+// somewhere else entirely. Pinning the widths is what lets a subtotal be read
+// straight down against the total beneath it.
+// Sums to 268mm against the 269mm usable on landscape A4 (297mm less 14mm
+// margins), so it fills the page without overflowing it.
+const PDF_TRIP_COLUMN_STYLES = {
+  0: { cellWidth: 70 },                    // Start Location
+  1: { cellWidth: 70 },                    // End Location
+  2: { cellWidth: 18, halign: 'right' },   // Miles
+  3: { cellWidth: 40 },                    // Vehicle
+  4: { cellWidth: 26 },                    // Trip Date
+  5: { cellWidth: 22 },                    // Start Time
+  6: { cellWidth: 22 },                    // End Time
+};
 
 function exportPDF() {
   const { jsPDF } = window.jspdf;
@@ -1876,22 +1914,49 @@ function exportPDF() {
       tableStartY = doc.lastAutoTable.finalY + 6;
     }
 
+    // One table per business inside the year, each with its own subtotal, so a
+    // year's page can be read per business without adding it up by hand. The
+    // Business column is dropped from these rows — the section heading already
+    // says which business it is, and repeating it down every row wastes the
+    // width that the location columns need.
+    groupTripsByBusiness(group.trips).forEach(bGroup => {
+      const bMiles = bGroup.trips.reduce((sum, t) => sum + (t.miles ?? 0), 0);
+
+      doc.setFontSize(8);
+      doc.setTextColor(79, 70, 229);
+      doc.text(bGroup.name, 14, tableStartY);
+      tableStartY += 3;
+
+      doc.autoTable({
+        startY: tableStartY,
+        head: [['Start Location', 'End Location', 'Miles', 'Vehicle', 'Trip Date', 'Start Time', 'End Time']],
+        body: bGroup.trips.map(t => [
+          t.start, t.end, t.miles ?? '',
+          t.vehicle_name || '',
+          t.trip_date    || '',
+          t.start_time   || '',
+          t.end_time     || ''
+        ]),
+        foot: [['', 'Subtotal', Math.round(bMiles * 100) / 100, '', '', '', '']],
+        headStyles:  { fillColor: [79, 70, 229], fontSize: 7, fontStyle: 'bold' },
+        footStyles:  { fillColor: [238, 242, 255], textColor: [79, 70, 229], fontStyle: 'bold', fontSize: 7 },
+        bodyStyles:  { fontSize: 7 },
+        columnStyles: PDF_TRIP_COLUMN_STYLES,
+        margin: { left: 14, right: 14 },
+      });
+      tableStartY = doc.lastAutoTable.finalY + 6;
+    });
+
+    // Year total across every business on the page.
     doc.autoTable({
       startY: tableStartY,
-      head: [['Start Location', 'End Location', 'Miles', 'Vehicle', 'Business', 'Trip Date', 'Start Time', 'End Time']],
-      body: group.trips.map(t => [
-        t.start, t.end, t.miles ?? '',
-        t.vehicle_name  || '',
-        t.business_name || '',
-        t.trip_date    || '',
-        t.start_time   || '',
-        t.end_time     || ''
-      ]),
-      foot: [['', 'Total', Math.round(yearMiles * 100) / 100, '', '', '', '', '']],
+      body: [],
+      foot: [['', `${yearLabel} total`, Math.round(yearMiles * 100) / 100, '', '', '', '']],
+      showHead: 'never',
       headStyles:  { fillColor: [79, 70, 229], fontSize: 7, fontStyle: 'bold' },
       footStyles:  { fillColor: [238, 242, 255], textColor: [79, 70, 229], fontStyle: 'bold', fontSize: 7 },
       bodyStyles:  { fontSize: 7 },
-      columnStyles: { 2: { halign: 'right' } },
+      columnStyles: PDF_TRIP_COLUMN_STYLES,
       alternateRowStyles: { fillColor: [248, 250, 252] },
       margin: { left: 14, right: 14 },
     });
