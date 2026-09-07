@@ -323,6 +323,15 @@
     }
     .form-input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(79,70,229,.12); }
     .vehicle-hint { font-size: .75rem; color: var(--muted); margin-top: 4px; min-height: 16px; }
+    .trip-notes {
+      width: 100%; box-sizing: border-box; resize: vertical;
+      min-height: 58px; font-family: 'Inter', sans-serif;
+    }
+    .notes-counter { font-size: .68rem; color: var(--muted); text-align: right; margin-top: 2px; }
+    .trip-note-text {
+      font-size: .72rem; color: var(--muted); margin-top: 2px;
+      white-space: pre-wrap; overflow-wrap: anywhere;
+    }
     .vehicle-add-link {
       font-size: .74rem; font-weight: 600; color: var(--primary);
       text-decoration: none;
@@ -447,6 +456,12 @@
           <input type="time" id="tripEndTime" class="form-input">
         </div>
       </div>
+      <div style="margin-top:12px">
+        <label class="field-label" for="tripNotes">Notes</label>
+        <textarea id="tripNotes" class="form-input trip-notes" maxlength="500"
+                  placeholder="Purpose, client, anything worth remembering later"></textarea>
+        <div class="notes-counter" id="tripNotesCounter"></div>
+      </div>
       <div class="speed-warning" id="tripSpeedWarning">
         <i class="fas fa-triangle-exclamation"></i>
         <span id="tripSpeedWarningText"></span>
@@ -565,6 +580,12 @@
         <label>End Time</label>
         <input type="time" id="editEndTime">
       </div>
+    </div>
+    <div class="modal-field">
+      <label>Notes</label>
+      <textarea id="editNotes" class="trip-notes" maxlength="500"
+                placeholder="Purpose, client, anything worth remembering later"></textarea>
+      <div class="notes-counter" id="editNotesCounter"></div>
     </div>
     <div class="speed-warning" id="editSpeedWarning">
       <i class="fas fa-triangle-exclamation"></i>
@@ -725,6 +746,23 @@ function applyDefaultBusiness() {
   sel.value = def.id;
 }
 
+const NOTES_MAX = 500;
+
+// Shows remaining characters only as the limit approaches, so the counter is
+// not noise on a short note. maxlength already stops typing past the cap; the
+// server truncates too, since maxlength is trivially bypassed.
+function wireNotesCounter(textareaId, counterId) {
+  const el = document.getElementById(textareaId);
+  const out = document.getElementById(counterId);
+  if (!el || !out) return;
+  const update = () => {
+    const left = NOTES_MAX - el.value.length;
+    out.textContent = left <= 100 ? `${left} characters left` : '';
+  };
+  el.addEventListener('input', update);
+  update();
+}
+
 function vehicleHintChange(selectId, hintId) {
   const sel  = document.getElementById(selectId);
   const hint = document.getElementById(hintId);
@@ -747,6 +785,7 @@ function saveTripDraft() {
     end:       document.getElementById('end').value,
     vehicleId: document.getElementById('tripVehicle').value,
     businessId: document.getElementById('tripBusiness').value,
+    notes:      document.getElementById('tripNotes').value,
     tripDate:  document.getElementById('tripDate').value,
     startTime: document.getElementById('tripStartTime').value,
     endTime:   document.getElementById('tripEndTime').value,
@@ -787,6 +826,7 @@ function restoreTripDraft() {
     vehicleHintChange('tripVehicle', 'tripVehicleHint');
   }
   if ('businessId' in draft) document.getElementById('tripBusiness').value = draft.businessId;
+  if ('notes' in draft) document.getElementById('tripNotes').value = draft.notes;
   if (draft.tripDate) document.getElementById('tripDate').value = draft.tripDate;
   [['tripStartTime', draft.startTime], ['tripEndTime', draft.endTime]].forEach(([id, val]) => {
     if (!val) return;
@@ -1242,6 +1282,7 @@ document.getElementById('logTripBtn').addEventListener('click', async () => {
     end_place_id:   selectedPlaceIds.end,
     vehicle_id: vehicleVal ? parseInt(vehicleVal) : null,
     business_id: businessVal ? parseInt(businessVal) : null,
+    notes:      document.getElementById('tripNotes').value,
     trip_date:  document.getElementById('tripDate').value      || null,
     start_time: getTimeValue('tripStartTime'),
     end_time:   getTimeValue('tripEndTime'),
@@ -1270,6 +1311,8 @@ document.getElementById('logTripBtn').addEventListener('click', async () => {
     applyDefaultVehicle();
     document.getElementById('tripBusiness').value = '';
     applyDefaultBusiness();
+    document.getElementById('tripNotes').value = '';
+    document.getElementById('tripNotesCounter').textContent = '';
     document.getElementById('tripDate').value      = '';
     initTimeInput('tripStartTime');
     initTimeInput('tripEndTime');
@@ -1368,6 +1411,7 @@ function prependTripRow(trip, prepend = true) {
   row.dataset.vehicleName = trip.vehicle_name || '';
   row.dataset.businessId   = trip.business_id   || '';
   row.dataset.businessName = trip.business_name || '';
+  row.dataset.notes        = trip.notes || '';
   row.dataset.vehicleSub  = trip.vehicle_sub  || '';
   row.dataset.tripDate    = trip.trip_date    || '';
   row.dataset.startTime   = trip.start_time   || '';
@@ -1382,6 +1426,7 @@ function prependTripRow(trip, prepend = true) {
     </div>
     <div class="trip-loc">
       <div class="trip-loc-main" title="${escHtml(trip.end)}">${escHtml(trip.end)}</div>
+      <div class="trip-note-text" style="${trip.notes ? '' : 'display:none'}">${escHtml(trip.notes || '')}</div>
     </div>
     <div class="trip-mi">${milesDisplay(trip.miles)}</div>
     <div class="trip-date">
@@ -1506,6 +1551,8 @@ function openEditModal(id) {
   document.getElementById('editMiles').textContent = editingTrip.miles != null ? editingTrip.miles : 'Pending';
 
   document.getElementById('editBusiness').value = row.dataset.businessId || '';
+  document.getElementById('editNotes').value = row.dataset.notes || '';
+  document.getElementById('editNotesCounter').textContent = '';
   const vehicleSel = document.getElementById('editVehicle');
   vehicleSel.value = row.dataset.vehicleId || '';
   const selOpt = vehicleSel.options[vehicleSel.selectedIndex];
@@ -1622,6 +1669,7 @@ async function saveEdit() {
     duration_seconds: editingTrip.durationSeconds,
     vehicle_id: vehicleVal ? parseInt(vehicleVal) : null,
     business_id: businessVal ? parseInt(businessVal) : null,
+    notes:      document.getElementById('editNotes').value,
     trip_date:  document.getElementById('editTripDate').value  || null,
     start_time: getTimeValue('editStartTime'),
     end_time:   getTimeValue('editEndTime'),
@@ -1659,6 +1707,8 @@ applyTripDateTimeDefaults();
 // Restore the draft only once BOTH lists are in. Each load applies its own
 // default when it resolves, so restoring earlier would let a late-arriving
 // list overwrite a value the draft had deliberately cleared.
+wireNotesCounter('tripNotes', 'tripNotesCounter');
+wireNotesCounter('editNotes', 'editNotesCounter');
 Promise.all([loadVehicles(), loadBusinesses()]).then(restoreTripDraft);
 loadHistory();
 
@@ -1700,7 +1750,7 @@ function yearRowBlock(group) {
     rows.push([]);
   }
 
-  rows.push(['Start Location', 'End Location', 'Miles', 'Vehicle', 'Business', 'Trip Date', 'Start Time', 'End Time', 'Logged At']);
+  rows.push(['Start Location', 'End Location', 'Miles', 'Vehicle', 'Business', 'Trip Date', 'Start Time', 'End Time', 'Logged At', 'Notes']);
   group.trips.forEach(t => rows.push([
     t.start, t.end, t.miles ?? '',
     t.vehicle_name  || '',
@@ -1708,9 +1758,10 @@ function yearRowBlock(group) {
     t.trip_date    || '',
     t.start_time   || '',
     t.end_time     || '',
-    t.timestamp
+    t.timestamp,
+    t.notes        || ''
   ]));
-  rows.push(['', 'TOTAL', round2(yearMiles), '', '', '', '', '', '']);
+  rows.push(['', 'TOTAL', round2(yearMiles), '', '', '', '', '', '', '']);
   return rows;
 }
 
@@ -1741,7 +1792,7 @@ function exportExcel() {
     rows.push(...yearRowBlock(group));
 
     const ws = XLSX.utils.aoa_to_sheet(rows);
-    ws['!cols'] = [{ wch: 34 }, { wch: 34 }, { wch: 8 }, { wch: 18 }, { wch: 18 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 22 }];
+    ws['!cols'] = [{ wch: 34 }, { wch: 34 }, { wch: 8 }, { wch: 18 }, { wch: 18 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 22 }, { wch: 46 }];
     const sheetName = group.year === 'Unknown' ? 'Unknown Year' : group.year;
     XLSX.utils.book_append_sheet(wb, ws, sheetName);
   });
@@ -1831,13 +1882,18 @@ function groupSummary(trips, labelOf) {
 // Sums to 268mm against the 269mm usable on landscape A4 (297mm less 14mm
 // margins), so it fills the page without overflowing it.
 const PDF_TRIP_COLUMN_STYLES = {
-  0: { cellWidth: 70 },                    // Start Location
-  1: { cellWidth: 70 },                    // End Location
-  2: { cellWidth: 18, halign: 'right' },   // Miles
-  3: { cellWidth: 40 },                    // Vehicle
-  4: { cellWidth: 26 },                    // Trip Date
-  5: { cellWidth: 22 },                    // Start Time
-  6: { cellWidth: 22 },                    // End Time
+  0: { cellWidth: 52 },                    // Start Location
+  1: { cellWidth: 52 },                    // End Location
+  2: { cellWidth: 16, halign: 'right' },   // Miles
+  3: { cellWidth: 32 },                    // Vehicle
+  4: { cellWidth: 22 },                    // Trip Date
+  5: { cellWidth: 17 },                    // Start Time
+  6: { cellWidth: 17 },                    // End Time
+  // Notes wrap onto as many lines as they need inside this width, growing the
+  // row rather than spilling into the next column or off the page. A fixed
+  // width is what makes wrapping possible: an auto-sized column would stretch
+  // to the longest note and push the other columns off a landscape page.
+  7: { cellWidth: 60, overflow: 'linebreak' },  // Notes
 };
 
 function exportPDF() {
@@ -1929,18 +1985,19 @@ function exportPDF() {
 
       doc.autoTable({
         startY: tableStartY,
-        head: [['Start Location', 'End Location', 'Miles', 'Vehicle', 'Trip Date', 'Start Time', 'End Time']],
+        head: [['Start Location', 'End Location', 'Miles', 'Vehicle', 'Trip Date', 'Start Time', 'End Time', 'Notes']],
         body: bGroup.trips.map(t => [
           t.start, t.end, t.miles ?? '',
           t.vehicle_name || '',
           t.trip_date    || '',
           t.start_time   || '',
-          t.end_time     || ''
+          t.end_time     || '',
+          t.notes        || ''
         ]),
-        foot: [['', 'Subtotal', Math.round(bMiles * 100) / 100, '', '', '', '']],
+        foot: [['', 'Subtotal', Math.round(bMiles * 100) / 100, '', '', '', '', '']],
         headStyles:  { fillColor: [79, 70, 229], fontSize: 7, fontStyle: 'bold' },
         footStyles:  { fillColor: [238, 242, 255], textColor: [79, 70, 229], fontStyle: 'bold', fontSize: 7 },
-        bodyStyles:  { fontSize: 7 },
+        bodyStyles:  { fontSize: 7, valign: 'top' },
         columnStyles: PDF_TRIP_COLUMN_STYLES,
         margin: { left: 14, right: 14 },
       });
@@ -1951,7 +2008,7 @@ function exportPDF() {
     doc.autoTable({
       startY: tableStartY,
       body: [],
-      foot: [['', `${yearLabel} total`, Math.round(yearMiles * 100) / 100, '', '', '', '']],
+      foot: [['', `${yearLabel} total`, Math.round(yearMiles * 100) / 100, '', '', '', '', '']],
       showHead: 'never',
       headStyles:  { fillColor: [79, 70, 229], fontSize: 7, fontStyle: 'bold' },
       footStyles:  { fillColor: [238, 242, 255], textColor: [79, 70, 229], fontStyle: 'bold', fontSize: 7 },
