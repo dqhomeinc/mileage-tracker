@@ -138,6 +138,10 @@ class Trip(db.Model):
     # autocomplete. Stored so a recalculation routes the same two places
     # instead of re-resolving the display text; null for free-typed trips and
     # for every trip logged before the Routes migration.
+    # Free-text note for the trip: purpose, client, anything worth recalling
+    # when the log is reviewed months later. Capped in the route rather than by
+    # the column type, so the limit can be stated back to the user.
+    notes          = db.Column(db.Text, nullable=True)
     start_place_id = db.Column(db.String(255), nullable=True)
     end_place_id   = db.Column(db.String(255), nullable=True)
 
@@ -179,6 +183,7 @@ def _trip_dict(trip, vehicle_name=None, vehicle_sub=None, business_name=None):
         'start_time':   trip.start_time,
         'end_time':     trip.end_time,
         'duration_seconds': trip.duration_seconds,
+        'notes':        trip.notes,
         'start_place_id': trip.start_place_id,
         'end_place_id':   trip.end_place_id,
     }
@@ -203,6 +208,7 @@ def _migrate_db():
             additions = [
                 ('vehicle_id', 'INTEGER'),
                 ('business_id', 'INTEGER'),
+                ('notes', 'TEXT'),
                 ('trip_date',  'VARCHAR(10)'),
                 ('start_time', 'VARCHAR(5)'),
                 ('end_time',   'VARCHAR(5)'),
@@ -230,6 +236,7 @@ def _migrate_db():
             additions = [
                 ('vehicle_id', 'INTEGER'),
                 ('business_id', 'INTEGER'),
+                ('notes', 'TEXT'),
                 ('trip_date',  'VARCHAR(10)'),
                 ('start_time', 'VARCHAR(5)'),
                 ('end_time',   'VARCHAR(5)'),
@@ -688,6 +695,19 @@ def calculate():
     })
 
 
+MAX_NOTE_LENGTH = 500
+
+
+def _clean_notes(value):
+    """Trimmed note text, or None when blank.
+
+    Truncated rather than rejected: a note is incidental to the trip, and
+    failing the whole save over its length would lose the mileage too.
+    """
+    text = (value or '').strip()
+    return text[:MAX_NOTE_LENGTH] or None
+
+
 def _resolve_business(business_id):
     """(id, name) for a business the current user owns, else (None, None).
 
@@ -761,6 +781,7 @@ def log_trip():
         distance_miles=distance_miles,
         vehicle_id=vehicle_id,
         business_id=business_id,
+        notes=_clean_notes(data.get('notes')),
         trip_date=trip_date,
         start_time=start_time,
         end_time=end_time,
@@ -854,6 +875,7 @@ def update_trip(trip_id):
     trip.distance_miles = distance_miles
     trip.vehicle_id     = vehicle_id
     trip.business_id    = business_id
+    trip.notes          = _clean_notes(data.get('notes'))
     trip.trip_date      = trip_date
     trip.start_time     = start_time
     trip.end_time       = end_time
