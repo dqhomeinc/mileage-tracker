@@ -107,6 +107,13 @@
       box-shadow: 0 8px 24px rgba(0,0,0,.1);
       max-height: 210px; overflow-y: auto;
     }
+    .autocomplete-section {
+      padding: 6px 14px 4px; font-size: .66rem; font-weight: 700;
+      color: var(--muted); text-transform: uppercase; letter-spacing: .06em;
+      background: #FAFBFC; border-bottom: 1px solid #F1F5F9;
+    }
+    .autocomplete-item .ac-icon { color: #CBD5E1; font-size: .72rem; flex-shrink: 0; }
+    .autocomplete-item.is-recent .ac-icon { color: var(--primary); }
     .autocomplete-item {
       padding: 9px 14px; cursor: pointer; font-size: 0.85rem; color: var(--text);
       display: flex; align-items: center; gap: 8px;
@@ -870,6 +877,11 @@ const MAPS_BROWSER_KEY = {{ maps_browser_key | tojson }};
 const AUTOCOMPLETE_DEBOUNCE_MS = 800;
 const AUTOCOMPLETE_MIN_CHARS   = 5;
 
+// Recent addresses are matched locally against history already in memory, so
+// they cost nothing and can appear earlier and more eagerly than Places results.
+const RECENT_MIN_CHARS = 2;
+const RECENT_MAX       = 3;
+
 // Place ID of the suggestion the user picked for each field, keyed by input id.
 // Null whenever the text was typed or dictated rather than chosen, in which
 // case the server routes by address string instead.
@@ -897,21 +909,37 @@ function setupAutocomplete(inputId, dropdownId) {
     // describes that place, so fall back to address routing until they pick again.
     selectedPlaceIds[inputId] = null;
     const q = input.value.trim();
-    if (q.length < AUTOCOMPLETE_MIN_CHARS) { hideDropdown(dropdown); return; }
+    // Recent addresses need no request, so show them straight away rather than
+    // making the user wait out a debounce meant for the Places call.
+    const recents = recentAddressMatches(q, RECENT_MAX);
+    if (q.length < AUTOCOMPLETE_MIN_CHARS) {
+      renderDropdown(input, dropdown, recents, []);
+      return;
+    }
+    renderDropdown(input, dropdown, recents, []);
     debounceTimer = setTimeout(() => fetchSuggestions(q, input, dropdown), AUTOCOMPLETE_DEBOUNCE_MS);
   });
 
   input.addEventListener('keydown', (e) => {
-    const items = dropdown.querySelectorAll('.autocomplete-item');
+    // Indexed over the items rather than walking siblings: the list now carries
+    // section headings between entries, and a sibling step would land on one,
+    // highlighting a row that cannot be chosen and leaving Enter with no label.
+    const items = [...dropdown.querySelectorAll('.autocomplete-item')];
     const active = dropdown.querySelector('.autocomplete-item.active');
+    const at = items.indexOf(active);
+    const moveTo = (i) => {
+      if (!items.length) return;
+      active && active.classList.remove('active');
+      const el = items[(i + items.length) % items.length];
+      el.classList.add('active');
+      el.scrollIntoView({ block: 'nearest' });
+    };
     if (e.key === 'ArrowDown') {
       e.preventDefault();
-      const next = active ? active.nextElementSibling : items[0];
-      if (next) { active && active.classList.remove('active'); next.classList.add('active'); }
+      moveTo(at + 1);
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
-      const prev = active ? active.previousElementSibling : items[items.length - 1];
-      if (prev) { active && active.classList.remove('active'); prev.classList.add('active'); }
+      moveTo(at === -1 ? items.length - 1 : at - 1);
     } else if (e.key === 'Enter' && active) {
       e.preventDefault();
       applySuggestion(input, dropdown, active.dataset.label, active.dataset.placeId);
@@ -923,6 +951,84 @@ function setupAutocomplete(inputId, dropdownId) {
   document.addEventListener('click', (e) => {
     if (!input.contains(e.target) && !dropdown.contains(e.target)) hideDropdown(dropdown);
   });
+}
+
+// Addresses already used on a trip, newest first, deduped by text. Both ends of
+// every trip are candidates. The place ID recorded with the trip comes along,
+// so re-picking a known address routes by ID exactly as the original trip did —
+// and costs no Places request at all.
+//
+// Read from tripsData, which the history already holds, so this needs no
+// endpoint and no query of its own.
+function recentAddressMatches(query, limit) {
+  const q = query.trim().toLowerCase();
+  if (q.length < RECENT_MIN_CHARS) return [];
+  // Every word must appear somewhere in the address, rather than the whole
+  // query appearing as one run of characters. Addresses carry street, city and
+  // state between the parts a user actually types, so "home depot charlotte"
+  // has to match "The Home Depot, Albemarle Road, Charlotte, NC, USA" — a
+  // contiguous test misses it on the road name sitting in the middle.
+  const terms = q.split(/\s+/).filter(Boolean);
+  const seen = new Set();
+  const out = [];
+  for (const t of tripsData) {
+    for (const [label, placeId] of [[t.start, t.start_place_id], [t.end, t.end_place_id]]) {
+      if (!label) continue;
+      const key = label.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      if (terms.every(term => key.includes(term))) out.push({ label, placeId: placeId || null });
+      if (out.length >= limit) return out;
+    }
+  }
+  return out;
+}
+
+function buildAutocompleteItem(input, dropdown, label, placeId, isRecent) {
+  const item = document.createElement('div');
+  item.className = 'autocomplete-item' + (isRecent ? ' is-recent' : '');
+  item.dataset.label = label;
+  if (placeId) item.dataset.placeId = placeId;
+  const icon = document.createElement('i');
+  icon.className = `ac-icon fas ${isRecent ? 'fa-clock-rotate-left' : 'fa-location-dot'}`;
+  const text = document.createElement('span');
+  text.textContent = label;
+  item.append(icon, text);
+  item.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    applySuggestion(input, dropdown, label, placeId);
+  });
+  return item;
+}
+
+function addSectionHeading(dropdown, text) {
+  const h = document.createElement('div');
+  h.className = 'autocomplete-section';
+  h.textContent = text;
+  dropdown.appendChild(h);
+}
+
+// Renders both sections. Recent addresses lead because they are the ones the
+// user has actually driven; Places results follow. A Places result matching a
+// recent address is dropped rather than listed twice.
+function renderDropdown(input, dropdown, recents, predictions) {
+  const taken = new Set(recents.map(r => r.label.toLowerCase()));
+  const fresh = predictions.filter(p => !taken.has(p.text.text.toLowerCase()));
+  if (!recents.length && !fresh.length) { hideDropdown(dropdown); return; }
+
+  dropdown.innerHTML = '';
+  if (recents.length) {
+    addSectionHeading(dropdown, 'Recent addresses');
+    recents.forEach(r => dropdown.appendChild(
+      buildAutocompleteItem(input, dropdown, r.label, r.placeId, true)));
+  }
+  if (fresh.length) {
+    if (recents.length) addSectionHeading(dropdown, 'Search results');
+    fresh.slice(0, 6).forEach(p => dropdown.appendChild(
+      buildAutocompleteItem(input, dropdown, p.text.text, p.placeId, false)));
+  }
+  dropdown.classList.remove('d-none');
+  fitDropdownToScroller(dropdown);
 }
 
 // Commit a suggestion to the input, remembering its place ID so the trip is
@@ -967,23 +1073,9 @@ function fetchSuggestions(query, input, dropdown) {
       const predictions = (data.suggestions || [])
         .map(s => s.placePrediction)
         .filter(p => p && p.placeId && p.text && p.text.text);
-      if (!predictions.length) { hideDropdown(dropdown); return; }
-      dropdown.innerHTML = '';
-      predictions.slice(0, 6).forEach(p => {
-        const label = p.text.text;
-        const item = document.createElement('div');
-        item.className = 'autocomplete-item';
-        item.textContent = label;
-        item.dataset.label = label;
-        item.dataset.placeId = p.placeId;
-        item.addEventListener('mousedown', (e) => {
-          e.preventDefault();
-          applySuggestion(input, dropdown, label, p.placeId);
-        });
-        dropdown.appendChild(item);
-      });
-      dropdown.classList.remove('d-none');
-      fitDropdownToScroller(dropdown);
+      // Recomputed rather than captured when the request was fired, so the
+      // sections stay consistent if history loaded while it was in flight.
+      renderDropdown(input, dropdown, recentAddressMatches(query, RECENT_MAX), predictions);
     })
     .catch(err => {
       // Log rather than swallow: a blocked provider, an expired key and a
