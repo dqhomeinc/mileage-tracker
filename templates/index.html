@@ -1070,6 +1070,11 @@ function fetchSuggestions(query, input, dropdown) {
       return r.json();
     })
     .then(data => {
+      // A response for text the user has since changed is stale: the input
+      // listener has already drawn recents for the current text, and a newer
+      // request may be on its way. Rendering this one would put back results
+      // for a query that is no longer in the box.
+      if (input.value.trim() !== query) return;
       const predictions = (data.suggestions || [])
         .map(s => s.placePrediction)
         .filter(p => p && p.placeId && p.text && p.text.text);
@@ -1082,7 +1087,11 @@ function fetchSuggestions(query, input, dropdown) {
       // dropped connection otherwise all present as an empty dropdown, which
       // makes an outage indistinguishable from a query with no matches.
       console.warn('[autocomplete]', err);
-      hideDropdown(dropdown);
+      // Keep the recent addresses: they come from history in memory and have
+      // nothing to do with the request that failed, so a Places outage — or an
+      // extension blocking the domain — shouldn't take them down with it.
+      if (input.value.trim() !== query) return;
+      renderDropdown(input, dropdown, recentAddressMatches(query, RECENT_MAX), []);
     });
 }
 
