@@ -729,12 +729,16 @@ function applyDefaultVehicle() {
 // duration into the feasibility check.
 function applyTripDateTimeDefaults() {
   const dateEl = document.getElementById('tripDate');
-  if (dateEl && !dateEl.value) dateEl.value = localToday();
+  if (dateEl && !dateEl.value) {
+    dateEl.value = localToday();
+    dateEl._defaulted = true;   // page-filled: saveTripDraft leaves it out
+  }
 
   const timeEl = document.getElementById('tripStartTime');
   if (timeEl && !timeEl.value) {
     timeEl.value = localNowTime();
     timeEl._userSet = true;
+    timeEl._defaulted = true;
   }
 }
 
@@ -808,22 +812,31 @@ function vehicleHintChange(selectId, hintId) {
 const TRIP_DRAFT_KEY = 'tripFormDraft';
 
 function saveTripDraft() {
+  const el = id => document.getElementById(id);
   const draft = {
-    start:     document.getElementById('start').value,
-    end:       document.getElementById('end').value,
-    vehicleId: document.getElementById('tripVehicle').value,
-    businessId: document.getElementById('tripBusiness').value,
-    notes:      document.getElementById('tripNotes').value,
-    tripDate:  document.getElementById('tripDate').value,
-    startTime: document.getElementById('tripStartTime').value,
-    endTime:   document.getElementById('tripEndTime').value,
+    start:   el('start').value,
+    end:     el('end').value,
+    notes:   el('tripNotes').value,
+    endTime: el('tripEndTime').value,
   };
-  // An untouched form is not a draft. Saving one means every return to this
-  // page "restores" emptiness over whatever the page would otherwise set up:
-  // leaving for the vehicles page and coming back would wipe the preselected
-  // default vehicle, because the restore is deliberately allowed to write an
-  // empty value (that is how a deliberately cleared vehicle survives).
-  if (!Object.values(draft).some(Boolean)) {
+  // A draft records what the user chose or typed — not what the page filled in
+  // for them. A vehicle or business that is only there because it's the
+  // default is left out, so coming back applies whatever the default is *then*
+  // rather than the one in force when they left; saving it is what wiped a
+  // newly starred default, and reinstated an old one after switching. The date
+  // and start time the page stamps are left out for the same reason, and
+  // because restoring them would bring back a stale "now" instead of a fresh one.
+  if (el('tripVehicle')._userSet)      draft.vehicleId  = el('tripVehicle').value;
+  if (el('tripBusiness')._userSet)     draft.businessId = el('tripBusiness').value;
+  if (!el('tripDate')._defaulted)      draft.tripDate   = el('tripDate').value;
+  if (!el('tripStartTime')._defaulted) draft.startTime  = el('tripStartTime').value;
+
+  // An untouched form is not a draft, or every return to the page would
+  // restore emptiness over what the page sets up. A vehicle or business the
+  // user picked counts even when it's "No vehicle" — that is a deliberate
+  // clear, and it should survive.
+  const hasContent = Object.values(draft).some(Boolean) || 'vehicleId' in draft || 'businessId' in draft;
+  if (!hasContent) {
     sessionStorage.removeItem(TRIP_DRAFT_KEY);
     return;
   }
@@ -849,18 +862,31 @@ function restoreTripDraft() {
   // that means the user had deliberately cleared the vehicle before leaving,
   // and a draft is a record of what they actually had on screen, so it wins
   // over the default that populateVehicleSelects just applied.
+  // The draft only holds a vehicle or business the user picked, so one that
+  // comes back is marked as picked and survives the next trip away.
   if ('vehicleId' in draft) {
-    document.getElementById('tripVehicle').value = draft.vehicleId;
+    const sel = document.getElementById('tripVehicle');
+    sel.value = draft.vehicleId;
+    sel._userSet = true;
     vehicleHintChange('tripVehicle', 'tripVehicleHint');
   }
-  if ('businessId' in draft) document.getElementById('tripBusiness').value = draft.businessId;
+  if ('businessId' in draft) {
+    const sel = document.getElementById('tripBusiness');
+    sel.value = draft.businessId;
+    sel._userSet = true;
+  }
   if ('notes' in draft) document.getElementById('tripNotes').value = draft.notes;
-  if (draft.tripDate) document.getElementById('tripDate').value = draft.tripDate;
+  if (draft.tripDate) {
+    const dateEl = document.getElementById('tripDate');
+    dateEl.value = draft.tripDate;
+    dateEl._defaulted = false;
+  }
   [['tripStartTime', draft.startTime], ['tripEndTime', draft.endTime]].forEach(([id, val]) => {
     if (!val) return;
     const el = document.getElementById(id);
     el.value = val;
     el._userSet = true;
+    el._defaulted = false;
   });
 }
 
@@ -1270,7 +1296,8 @@ function initTimeInput(id) {
   if (!el) return;
   el.value = '';
   el._userSet = false;
-  el.addEventListener('change', function() { this._userSet = true; });
+  el._defaulted = false;
+  el.addEventListener('change', function() { this._userSet = true; this._defaulted = false; });
 }
 
 function getTimeValue(id) {
@@ -1401,6 +1428,12 @@ document.getElementById('editEndTime').addEventListener('change', checkEditSpeed
 
 
 document.getElementById('tripVehicle').addEventListener('change', () => vehicleHintChange('tripVehicle', 'tripVehicleHint'));
+// A change event only comes from the user: preselecting a default sets .value
+// in code and fires nothing. So these flags mean "the user chose this", which
+// is what decides whether a draft keeps it.
+['tripVehicle', 'tripBusiness'].forEach(id =>
+  document.getElementById(id).addEventListener('change', e => { e.target._userSet = true; }));
+document.getElementById('tripDate').addEventListener('change', e => { e.target._defaulted = false; });
 document.getElementById('editVehicle').addEventListener('change', () => vehicleHintChange('editVehicle', 'editVehicleHint'));
 
 
@@ -1454,9 +1487,11 @@ document.getElementById('logTripBtn').addEventListener('click', async () => {
     // Clear first, then re-apply: logging one trip and immediately logging
     // another should start from the default again, not from a blank select.
     document.getElementById('tripVehicle').value   = '';
+    document.getElementById('tripVehicle')._userSet = false;
     document.getElementById('tripVehicleHint').textContent = '';
     applyDefaultVehicle();
     document.getElementById('tripBusiness').value = '';
+    document.getElementById('tripBusiness')._userSet = false;
     applyDefaultBusiness();
     document.getElementById('tripNotes').value = '';
     document.getElementById('tripNotesCounter').textContent = '';
