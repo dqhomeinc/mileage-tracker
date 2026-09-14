@@ -1,4 +1,5 @@
 import base64
+import json
 import os
 import re
 from datetime import datetime, date
@@ -134,14 +135,19 @@ class Trip(db.Model):
     start_time     = db.Column(db.String(5),  nullable=True)
     end_time       = db.Column(db.String(5),  nullable=True)
     duration_seconds = db.Column(db.Integer, nullable=True)
-    # Google Places IDs for the locations, when the user picked them from
-    # autocomplete. Stored so a recalculation routes the same two places
-    # instead of re-resolving the display text; null for free-typed trips and
-    # for every trip logged before the Routes migration.
     # Free-text note for the trip: purpose, client, anything worth recalling
     # when the log is reviewed months later. Capped in the route rather than by
     # the column type, so the limit can be stated back to the user.
     notes          = db.Column(db.Text, nullable=True)
+    # Intermediate stops between start and end, in the order visited, as a JSON
+    # list of {"label", "place_id"}. A column rather than a table: stops are
+    # only ever read with their trip, are few, and are ordered, so a join would
+    # add a query per history load and a position column to keep straight.
+    stops          = db.Column(db.Text, nullable=True)
+    # Google Places IDs for the locations, when the user picked them from
+    # autocomplete. Stored so a recalculation routes the same two places
+    # instead of re-resolving the display text; null for free-typed trips and
+    # for every trip logged before the Routes migration.
     start_place_id = db.Column(db.String(255), nullable=True)
     end_place_id   = db.Column(db.String(255), nullable=True)
 
@@ -184,6 +190,7 @@ def _trip_dict(trip, vehicle_name=None, vehicle_sub=None, business_name=None):
         'end_time':     trip.end_time,
         'duration_seconds': trip.duration_seconds,
         'notes':        trip.notes,
+        'stops':        _stops_from_db(trip.stops),
         'start_place_id': trip.start_place_id,
         'end_place_id':   trip.end_place_id,
     }
@@ -209,6 +216,7 @@ def _migrate_db():
                 ('vehicle_id', 'INTEGER'),
                 ('business_id', 'INTEGER'),
                 ('notes', 'TEXT'),
+                ('stops', 'TEXT'),
                 ('trip_date',  'VARCHAR(10)'),
                 ('start_time', 'VARCHAR(5)'),
                 ('end_time',   'VARCHAR(5)'),
@@ -237,6 +245,7 @@ def _migrate_db():
                 ('vehicle_id', 'INTEGER'),
                 ('business_id', 'INTEGER'),
                 ('notes', 'TEXT'),
+                ('stops', 'TEXT'),
                 ('trip_date',  'VARCHAR(10)'),
                 ('start_time', 'VARCHAR(5)'),
                 ('end_time',   'VARCHAR(5)'),
@@ -397,12 +406,28 @@ def _parse_route_duration(value):
 
 
 def calculate_driving_miles(start_text, end_text,
-                            start_place_id=None, end_place_id=None):
-    """(miles, duration_seconds) for the driving route between two points.
+                            start_place_id=None, end_place_id=None, stops=None):
+    """(miles, duration_seconds) for the driving route between two points,
+    through any stops in the order given. The duration is driving time only.
 
     Raises ValueError when the route can't be determined — the caller turns
     that into a user-facing message.
     """
+    body = {
+        'origin':      _route_waypoint(start_place_id, start_text),
+        'destination': _route_waypoint(end_place_id, end_text),
+        'travelMode': 'DRIVE',
+        'units': 'IMPERIAL',
+        # routingPreference is deliberately left unset. TRAFFIC_AWARE moves
+        # the request to the Compute Routes Pro SKU, and a mileage log
+        # shouldn't record a different distance depending on traffic.
+    }
+    if stops:
+        # Visited in the order given. optimizeWaypointOrder is deliberately left
+        # unset: order changes the mileage a lot (Charlotte to Concord via
+        # Kannapolis then Huntersville is 67.9 mi; the reverse is 38.8), so the
+        # route must be the one the user drove, not the shortest available.
+        body['intermediates'] = [_route_waypoint(st.get('place_id'), st['label']) for st in stops]
     resp = requests.post(
         ROUTES_API_URL,
         headers={
@@ -410,15 +435,7 @@ def calculate_driving_miles(start_text, end_text,
             'X-Goog-Api-Key': app.config['GOOGLE_MAPS_SERVER_KEY'],
             'X-Goog-FieldMask': ROUTES_FIELD_MASK,
         },
-        json={
-            'origin':      _route_waypoint(start_place_id, start_text),
-            'destination': _route_waypoint(end_place_id, end_text),
-            'travelMode': 'DRIVE',
-            'units': 'IMPERIAL',
-            # routingPreference is deliberately left unset. TRAFFIC_AWARE moves
-            # the request to the Compute Routes Pro SKU, and a mileage log
-            # shouldn't record a different distance depending on traffic.
-        },
+        json=body,
         timeout=10,
     )
     if resp.status_code == 400:
@@ -459,8 +476,17 @@ def _elapsed_seconds(start_time, end_time):
 FEASIBILITY_MIN_RATIO = 0.5  # flag "too fast" if elapsed < 50% of the Routes API's expected duration
 FEASIBILITY_MAX_RATIO = 3.0  # flag "too slow" if elapsed > 300% of the Routes API's expected duration
 
+# Routes' duration is driving only, and how long someone spends at a stop is
+# unknown. Each stop adds this much headroom before a trip counts as
+# implausibly slow — enough for a meeting or a site visit — while a 12-hour
+# AM/PM slip is still caught on a short trip with up to about three stops.
+# Stops can only add time, never remove it, so the too-fast bound is unchanged.
+# The client mirrors this in feasibilityWarning(); keep the two in step.
+STOP_DWELL_ALLOWANCE_SECONDS = 2 * 60 * 60
 
-def check_trip_feasibility(start_time, end_time, distance_miles, duration_seconds):
+
+def check_trip_feasibility(start_time, end_time, distance_miles, duration_seconds,
+                           stop_count=0):
     """Warning string if the clock-time gap is implausible (too fast or too
     slow) for the distance, else None. Pure function, never raises — non-blocking."""
     if duration_seconds is None or not distance_miles:
@@ -472,7 +498,13 @@ def check_trip_feasibility(start_time, end_time, distance_miles, duration_second
     if elapsed < duration_seconds * FEASIBILITY_MIN_RATIO:
         return (f'{distance_miles} miles in {elapsed_min} min is much faster than the '
                 f'typical ~{expected_min} min for this route — double check the times.')
-    if elapsed > duration_seconds * FEASIBILITY_MAX_RATIO:
+    max_elapsed = duration_seconds * FEASIBILITY_MAX_RATIO + stop_count * STOP_DWELL_ALLOWANCE_SECONDS
+    if elapsed > max_elapsed:
+        if stop_count:
+            hours = STOP_DWELL_ALLOWANCE_SECONDS // 3600
+            return (f'{distance_miles} miles in {elapsed_min} min is much longer than '
+                    f'~{expected_min} min of driving, even allowing {hours} h at each of '
+                    f'{stop_count} stop{"" if stop_count == 1 else "s"} — double check the times.')
         return (f'{distance_miles} miles in {elapsed_min} min is much longer than the '
                 f'typical ~{expected_min} min for this route — double check the times.')
     return None
@@ -678,10 +710,15 @@ def calculate():
     if not start or not end:
         return jsonify({'error': 'Both start and end locations are required.'}), 400
     try:
+        stops = _clean_stops(data.get('stops'))
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    try:
         miles, duration_seconds = calculate_driving_miles(
             start, end,
             start_place_id=(data.get('start_place_id') or None),
             end_place_id=(data.get('end_place_id') or None),
+            stops=stops,
         )
     except ValueError as e:
         return jsonify({'error': str(e)}), 422
@@ -706,6 +743,46 @@ def _clean_notes(value):
     """
     text = (value or '').strip()
     return text[:MAX_NOTE_LENGTH] or None
+
+
+# Routes bills a request with up to 10 intermediate waypoints as Essentials;
+# 11 to 25 move it to Pro at twice the price per request. Capped here so a
+# stop-heavy trip never changes what a calculation costs.
+MAX_STOPS = 10
+
+
+def _clean_stops(value):
+    """Ordered stops as [{'label', 'place_id'}], with blank entries dropped.
+
+    Raises ValueError past MAX_STOPS. An overlong note is trimmed, but a stop
+    can't be: dropping one would route a different trip than the one entered
+    and record mileage that silently doesn't match it.
+    """
+    stops = []
+    for item in value or []:
+        if isinstance(item, str):
+            label, place_id = item, None
+        elif isinstance(item, dict):
+            label, place_id = item.get('label'), item.get('place_id')
+        else:
+            continue
+        label = (label or '').strip()
+        if label:
+            stops.append({'label': label, 'place_id': (place_id or '').strip() or None})
+    if len(stops) > MAX_STOPS:
+        raise ValueError(f'A trip can have at most {MAX_STOPS} stops.')
+    return stops
+
+
+def _stops_from_db(raw):
+    """Stored stops back to a list; anything unreadable reads as no stops."""
+    if not raw:
+        return []
+    try:
+        stops = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    return stops if isinstance(stops, list) else []
 
 
 def _resolve_business(business_id):
@@ -737,6 +814,10 @@ def log_trip():
 
     start_place_id = (data.get('start_place_id') or '').strip() or None
     end_place_id   = (data.get('end_place_id')   or '').strip() or None
+    try:
+        stops = _clean_stops(data.get('stops'))
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
 
     distance_miles   = data.get('distance_miles')
     duration_seconds = data.get('duration_seconds')
@@ -749,6 +830,7 @@ def log_trip():
                 start, end,
                 start_place_id=start_place_id,
                 end_place_id=end_place_id,
+                stops=stops,
             )
         except ValueError as e:
             distance_error = str(e)
@@ -772,7 +854,8 @@ def log_trip():
 
     warning = None
     if distance_miles is not None:
-        warning = check_trip_feasibility(start_time, end_time, distance_miles, duration_seconds)
+        warning = check_trip_feasibility(start_time, end_time, distance_miles, duration_seconds,
+                                         stop_count=len(stops))
 
     trip = Trip(
         user_id=current_user.id,
@@ -788,6 +871,7 @@ def log_trip():
         duration_seconds=duration_seconds,
         start_place_id=start_place_id,
         end_place_id=end_place_id,
+        stops=json.dumps(stops) if stops else None,
     )
     db.session.add(trip)
     db.session.commit()
@@ -857,12 +941,23 @@ def update_trip(trip_id):
 
     business_id, business_name = _resolve_business(data.get('business_id'))
 
+    # A client that doesn't send stops at all leaves them as they were, so an
+    # edit from a page loaded before this change can't erase a trip's route.
+    if 'stops' in data:
+        try:
+            stops = _clean_stops(data.get('stops'))
+        except ValueError as e:
+            return jsonify({'error': str(e)}), 400
+    else:
+        stops = _stops_from_db(trip.stops)
+
     # Fall back to the trip's already-stored duration when the client didn't
     # send a fresh one (i.e. the route wasn't recalculated this edit).
     duration_seconds = data.get('duration_seconds') or trip.duration_seconds
     warning = None
     if distance_miles is not None:
-        warning = check_trip_feasibility(start_time, end_time, distance_miles, duration_seconds)
+        warning = check_trip_feasibility(start_time, end_time, distance_miles, duration_seconds,
+                                         stop_count=len(stops))
 
     # The client sends a place ID back only for a location it left untouched;
     # editing the text clears it, so the trip falls back to address routing
@@ -876,6 +971,7 @@ def update_trip(trip_id):
     trip.vehicle_id     = vehicle_id
     trip.business_id    = business_id
     trip.notes          = _clean_notes(data.get('notes'))
+    trip.stops          = json.dumps(stops) if stops else None
     trip.trip_date      = trip_date
     trip.start_time     = start_time
     trip.end_time       = end_time

@@ -130,6 +130,31 @@
     .autocomplete-item:hover::before, .autocomplete-item.active::before { color: var(--primary); }
 
     /* ── Route connector ─────────────────────── */
+    .stops-list { display: flex; flex-direction: column; gap: 8px; }
+    .stops-list:empty { display: none; }
+    .stop-row { display: flex; align-items: flex-start; gap: 6px; }
+    .stop-row .stop-field { flex: 1 1 auto; min-width: 0; }
+    .stop-actions { display: flex; gap: 2px; padding-top: 7px; flex-shrink: 0; }
+    .stop-btn {
+      width: 26px; height: 26px; border: none; border-radius: 6px; flex-shrink: 0;
+      background: transparent; color: #94A3B8; cursor: pointer; font-size: .72rem;
+      display: flex; align-items: center; justify-content: center; transition: all .2s;
+    }
+    .stop-btn:hover:not(:disabled) { background: #EEF2FF; color: var(--primary); }
+    .stop-btn.stop-del:hover:not(:disabled) { background: #FEF2F2; color: #EF4444; }
+    .stop-btn:disabled { opacity: .3; cursor: default; }
+    .btn-add-stop {
+      margin: 8px 0 2px; padding: 5px 12px; border-radius: 8px;
+      border: 1.5px dashed var(--border); background: transparent;
+      color: var(--muted); font-size: .78rem; font-weight: 600; cursor: pointer;
+      font-family: 'Inter', sans-serif; transition: all .2s;
+    }
+    .btn-add-stop:hover:not(:disabled) { border-color: var(--primary); color: var(--primary); background: #EEF2FF; }
+    .btn-add-stop:disabled { opacity: .5; cursor: default; }
+    .trip-stops-text {
+      font-size: .72rem; color: var(--muted); margin-top: 2px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
     .route-divider {
       display: flex; align-items: center; gap: 10px;
       margin: 10px 0; color: #CBD5E1; font-size: 0.75rem;
@@ -427,6 +452,10 @@
 
     <div class="route-divider"><i class="fas fa-arrow-down"></i></div>
 
+    <div class="stops-list" id="tripStops"></div>
+    <button type="button" class="btn-add-stop" id="tripAddStop"><i class="fas fa-plus"></i> Add stop</button>
+    <div class="route-divider"><i class="fas fa-arrow-down"></i></div>
+
     <div>
       <label class="field-label" for="end">End Location</label>
       <div class="autocomplete-wrapper">
@@ -566,6 +595,11 @@
         <input type="text" id="editStart" autocomplete="off" placeholder="Start location">
         <div class="autocomplete-dropdown d-none" id="editStartDropdown"></div>
       </div>
+    </div>
+    <div class="modal-field">
+      <label>Stops</label>
+      <div class="stops-list" id="editStops"></div>
+      <button type="button" class="btn-add-stop" id="editAddStop"><i class="fas fa-plus"></i> Add stop</button>
     </div>
     <div class="modal-field">
       <label>End Location</label>
@@ -817,6 +851,10 @@ function saveTripDraft() {
     tripDate:  document.getElementById('tripDate').value,
     startTime: document.getElementById('tripStartTime').value,
     endTime:   document.getElementById('tripEndTime').value,
+    // Left undefined when there are none: an empty array is truthy, so it would
+    // make every untouched form count as a draft and bring back the bug where
+    // returning to the page wiped the preselected default vehicle.
+    stops:     tripStops.values().length ? tripStops.values().map(st => st.label) : undefined,
   };
   // An untouched form is not a draft. Saving one means every return to this
   // page "restores" emptiness over whatever the page would otherwise set up:
@@ -855,6 +893,8 @@ function restoreTripDraft() {
   }
   if ('businessId' in draft) document.getElementById('tripBusiness').value = draft.businessId;
   if ('notes' in draft) document.getElementById('tripNotes').value = draft.notes;
+  // Text only, like start and end: drafts never carry place IDs.
+  if (Array.isArray(draft.stops)) { tripStops.clear(); draft.stops.forEach(l => tripStops.add(l)); }
   if (draft.tripDate) document.getElementById('tripDate').value = draft.tripDate;
   [['tripStartTime', draft.startTime], ['tripEndTime', draft.endTime]].forEach(([id, val]) => {
     if (!val) return;
@@ -972,7 +1012,10 @@ function recentAddressMatches(query, limit) {
   const seen = new Set();
   const out = [];
   for (const t of tripsData) {
-    for (const [label, placeId] of [[t.start, t.start_place_id], [t.end, t.end_place_id]]) {
+    const places = [[t.start, t.start_place_id],
+                    ...(t.stops || []).map(st => [st.label, st.place_id]),
+                    [t.end, t.end_place_id]];
+    for (const [label, placeId] of places) {
       if (!label) continue;
       const key = label.toLowerCase();
       if (seen.has(key)) continue;
@@ -1126,6 +1169,109 @@ function hideDropdown(dropdown) {
 
 setupAutocomplete('start', 'startDropdown');
 setupAutocomplete('end', 'endDropdown');
+
+
+// ─── Intermediate stops ───────────────────────────────────────────────────
+
+// Mirrors MAX_STOPS in main.py: past 10 intermediates Routes bills at the Pro
+// rate, so the server rejects more rather than silently changing the cost.
+const MAX_STOPS = 10;
+let stopSeq = 0;
+
+function parseStops(raw) {
+  try { const v = JSON.parse(raw || '[]'); return Array.isArray(v) ? v : []; }
+  catch { return []; }
+}
+
+// Identity of a stop list for "has this changed since the distance was
+// calculated": the labels in order. Order is part of it — reordering the same
+// stops changes the mileage.
+function stopsKey(stops) { return JSON.stringify(stops.map(s => s.label)); }
+
+// One ordered list of stop inputs with add / remove / move up / move down.
+// Each input gets the same autocomplete and place-ID tracking as start and
+// end, so a picked stop routes by ID and a typed one routes by its text.
+// Moving a row keeps its input, so its place ID travels with it.
+function stopsEditor(listId, addBtnId, variant) {
+  const list = document.getElementById(listId);
+  const addBtn = document.getElementById(addBtnId);
+  const rows = () => [...list.querySelectorAll('.stop-row')];
+
+  function refresh() {
+    const rs = rows();
+    rs.forEach((r, i) => {
+      r.querySelector('input').placeholder = `Stop ${i + 1}`;
+      r.querySelector('[data-act="up"]').disabled = i === 0;
+      r.querySelector('[data-act="down"]').disabled = i === rs.length - 1;
+    });
+    addBtn.disabled = rs.length >= MAX_STOPS;
+    addBtn.title = rs.length >= MAX_STOPS ? `A trip can have up to ${MAX_STOPS} stops` : '';
+  }
+
+  function remove(row) {
+    delete selectedPlaceIds[row.querySelector('input').id];
+    row.remove();
+    refresh();
+  }
+
+  function add(label = '', placeId = null) {
+    if (rows().length >= MAX_STOPS) return null;
+    const id = `${listId}-${++stopSeq}`;
+    const row = document.createElement('div');
+    row.className = 'stop-row';
+    row.innerHTML = (variant === 'trip'
+      ? `<div class="autocomplete-wrapper stop-field">
+           <div class="input-row">
+             <span class="loc-icon"><i class="fas fa-circle" style="color:#F59E0B;font-size:.45rem"></i></span>
+             <input type="text" id="${id}" class="loc-input" autocomplete="off">
+           </div>
+           <div class="autocomplete-dropdown d-none" id="${id}-dd"></div>
+         </div>`
+      : `<div class="autocomplete-wrapper stop-field">
+           <input type="text" id="${id}" autocomplete="off">
+           <div class="autocomplete-dropdown d-none" id="${id}-dd"></div>
+         </div>`) +
+      `<div class="stop-actions">
+         <button type="button" class="stop-btn" data-act="up" title="Move stop earlier"><i class="fas fa-arrow-up"></i></button>
+         <button type="button" class="stop-btn" data-act="down" title="Move stop later"><i class="fas fa-arrow-down"></i></button>
+         <button type="button" class="stop-btn stop-del" data-act="remove" title="Remove stop"><i class="fas fa-times"></i></button>
+       </div>`;
+    list.appendChild(row);
+
+    const input = row.querySelector('input');
+    setupAutocomplete(id, `${id}-dd`);
+    setLocationText(input, label);
+    // After setLocationText, which clears it: a stop restored from a saved trip
+    // keeps its place ID until its text is edited, exactly like start and end.
+    selectedPlaceIds[id] = placeId || null;
+
+    row.querySelector('.stop-actions').addEventListener('click', (e) => {
+      const act = e.target.closest('[data-act]')?.dataset.act;
+      if (act === 'remove') remove(row);
+      else if (act === 'up' && row.previousElementSibling) list.insertBefore(row, row.previousElementSibling);
+      else if (act === 'down' && row.nextElementSibling) list.insertBefore(row.nextElementSibling, row);
+      refresh();
+    });
+    refresh();
+    return input;
+  }
+
+  function clear() { rows().forEach(remove); }
+
+  // Stops in visit order, blanks dropped, each with the place ID picked for it.
+  function values() {
+    return rows()
+      .map(r => { const inp = r.querySelector('input');
+                  return { label: inp.value.trim(), place_id: selectedPlaceIds[inp.id] || null }; })
+      .filter(st => st.label);
+  }
+
+  addBtn.addEventListener('click', () => add()?.focus());
+  return { add, clear, values };
+}
+
+const tripStops = stopsEditor('tripStops', 'tripAddStop', 'trip');
+const editStops = stopsEditor('editStops', 'editAddStop', 'edit');
 
 
 // ─── Voice input ──────────────────────────────────────────────────────────
@@ -1357,6 +1503,9 @@ function validateTripDate(value) {
 
 const FEASIBILITY_MIN_RATIO = 0.5;
 const FEASIBILITY_MAX_RATIO = 3.0;
+// Mirrors STOP_DWELL_ALLOWANCE_SECONDS in main.py: time at a stop is unknown,
+// so each one adds this much headroom before a trip counts as too slow.
+const STOP_DWELL_ALLOWANCE_SECONDS = 2 * 60 * 60;
 
 function elapsedSeconds(startTime, endTime) {
   if (!startTime || !endTime) return null;
@@ -1368,7 +1517,7 @@ function elapsedSeconds(startTime, endTime) {
   return (endMin - startMin) * 60;
 }
 
-function feasibilityWarning(startTime, endTime, distanceMiles, durationSeconds) {
+function feasibilityWarning(startTime, endTime, distanceMiles, durationSeconds, stopCount = 0) {
   if (durationSeconds == null || !distanceMiles) return null;
   const elapsed = elapsedSeconds(startTime, endTime);
   if (elapsed == null || elapsed <= 0) return null;
@@ -1377,7 +1526,12 @@ function feasibilityWarning(startTime, endTime, distanceMiles, durationSeconds) 
     return `${distanceMiles} miles in ${elapsedMin} min is much faster than the ` +
            `typical ~${expectedMin} min for this route — double check the times.`;
   }
-  if (elapsed > durationSeconds * FEASIBILITY_MAX_RATIO) {
+  if (elapsed > durationSeconds * FEASIBILITY_MAX_RATIO + stopCount * STOP_DWELL_ALLOWANCE_SECONDS) {
+    if (stopCount) {
+      return `${distanceMiles} miles in ${elapsedMin} min is much longer than ` +
+             `~${expectedMin} min of driving, even allowing ${STOP_DWELL_ALLOWANCE_SECONDS / 3600} h at each of ` +
+             `${stopCount} stop${stopCount === 1 ? '' : 's'} — double check the times.`;
+    }
     return `${distanceMiles} miles in ${elapsedMin} min is much longer than the ` +
            `typical ~${expectedMin} min for this route — double check the times.`;
   }
@@ -1392,7 +1546,7 @@ function updateSpeedWarning(warningElId, textElId, warning) {
 function checkEditSpeedLive() {
   const w = editingTrip && feasibilityWarning(
     getTimeValue('editStartTime'), getTimeValue('editEndTime'),
-    editingTrip.miles, editingTrip.durationSeconds
+    editingTrip.miles, editingTrip.durationSeconds, editingTrip.calcStopCount || 0
   );
   updateSpeedWarning('editSpeedWarning', 'editSpeedWarningText', w);
 }
@@ -1430,6 +1584,7 @@ document.getElementById('logTripBtn').addEventListener('click', async () => {
     vehicle_id: vehicleVal ? parseInt(vehicleVal) : null,
     business_id: businessVal ? parseInt(businessVal) : null,
     notes:      document.getElementById('tripNotes').value,
+    stops:      tripStops.values(),
     trip_date:  document.getElementById('tripDate').value      || null,
     start_time: getTimeValue('tripStartTime'),
     end_time:   getTimeValue('tripEndTime'),
@@ -1449,6 +1604,7 @@ document.getElementById('logTripBtn').addEventListener('click', async () => {
 
     setLocationText(document.getElementById('start'), '');
     setLocationText(document.getElementById('end'),   '');
+    tripStops.clear();
     document.getElementById('start').classList.remove('is-valid');
     document.getElementById('end').classList.remove('is-valid');
     // Clear first, then re-apply: logging one trip and immediately logging
@@ -1559,6 +1715,7 @@ function prependTripRow(trip, prepend = true) {
   row.dataset.businessId   = trip.business_id   || '';
   row.dataset.businessName = trip.business_name || '';
   row.dataset.notes        = trip.notes || '';
+  row.dataset.stops        = JSON.stringify(trip.stops || []);
   row.dataset.vehicleSub  = trip.vehicle_sub  || '';
   row.dataset.tripDate    = trip.trip_date    || '';
   row.dataset.startTime   = trip.start_time   || '';
@@ -1573,6 +1730,7 @@ function prependTripRow(trip, prepend = true) {
     </div>
     <div class="trip-loc">
       <div class="trip-loc-main" title="${escHtml(trip.end)}">${escHtml(trip.end)}</div>
+      ${(trip.stops || []).length ? `<div class="trip-stops-text" title="via ${escHtml(trip.stops.map(st => st.label).join(' → '))}">via ${escHtml(trip.stops.map(st => st.label.split(',')[0]).join(' → '))}</div>` : ''}
       <div class="trip-note-text" style="${trip.notes ? '' : 'display:none'}">${escHtml(trip.notes || '')}</div>
     </div>
     <div class="trip-mi">${milesDisplay(trip.miles)}</div>
@@ -1676,6 +1834,7 @@ let editingTrip = null;
 
 function openEditModal(id) {
   const row = document.getElementById(`trip-${id}`);
+  const storedStops = parseStops(row.dataset.stops);
   editingTrip = {
     id,
     miles: parseMiles(row.dataset.miles),
@@ -1688,6 +1847,9 @@ function openEditModal(id) {
     origEnd:     row.dataset.end,
     startPlaceId: row.dataset.startPlaceId || null,
     endPlaceId:   row.dataset.endPlaceId   || null,
+    // The stops the stored distance and duration were calculated through.
+    calcStopsKey:  stopsKey(storedStops),
+    calcStopCount: storedStops.length,
   };
   // placeIdsForEdit reads the trip's stored IDs rather than selectedPlaceIds,
   // so these are already safe — but go through the helper anyway to keep one
@@ -1695,6 +1857,8 @@ function openEditModal(id) {
   // previous time this modal was open.
   setLocationText(document.getElementById('editStart'), row.dataset.start);
   setLocationText(document.getElementById('editEnd'),   row.dataset.end);
+  editStops.clear();
+  storedStops.forEach(st => editStops.add(st.label, st.place_id));
   document.getElementById('editMiles').textContent = editingTrip.miles != null ? editingTrip.miles : 'Pending';
 
   document.getElementById('editBusiness').value = row.dataset.businessId || '';
@@ -1719,6 +1883,7 @@ function openEditModal(id) {
 function closeEditModal() {
   document.getElementById('editModal').classList.remove('open');
   editingTrip = null;
+  editStops.clear();
   updateSpeedWarning('editSpeedWarning', 'editSpeedWarningText', null);
 }
 
@@ -1746,11 +1911,12 @@ function placeIdsForEdit(start, end) {
 // editingTrip's miles/duration (and the locations they're now current
 // for) in place. Returns whether it succeeded; never throws.
 async function fetchEditDistance(start, end) {
+  const stops = editStops.values();
   try {
     const resp = await fetch('/calculate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ start, end, ...placeIdsForEdit(start, end) })
+      body: JSON.stringify({ start, end, ...placeIdsForEdit(start, end), stops })
     });
     const data = await resp.json();
     if (resp.ok) {
@@ -1758,6 +1924,8 @@ async function fetchEditDistance(start, end) {
       editingTrip.durationSeconds = data.duration_seconds;
       editingTrip.calcStart = start;
       editingTrip.calcEnd   = end;
+      editingTrip.calcStopsKey  = stopsKey(stops);
+      editingTrip.calcStopCount = stops.length;
       document.getElementById('editMiles').textContent = data.distance_miles;
       checkEditSpeedLive();
       return true;
@@ -1793,10 +1961,11 @@ async function saveEdit() {
   const btn = document.getElementById('saveEditBtn');
 
   // The distance in editingTrip is only valid for the locations it was last
-  // calculated for. If the user edited start/end without hitting Recalculate,
-  // it's now stale — recalculate here so a location change is never silently
-  // saved with the old trip's mileage.
-  if (start !== editingTrip.calcStart || end !== editingTrip.calcEnd) {
+  // calculated for. If the user edited start, end or any stop — including just
+  // reordering the stops — without hitting Recalculate, it's now stale, so
+  // recalculate here rather than save the old trip's mileage.
+  if (start !== editingTrip.calcStart || end !== editingTrip.calcEnd ||
+      stopsKey(editStops.values()) !== editingTrip.calcStopsKey) {
     btn.disabled = true;
     btn.textContent = 'Recalculating…';
     const ok = await fetchEditDistance(start, end);
@@ -1813,6 +1982,7 @@ async function saveEdit() {
   const payload = {
     start, end, distance_miles: editingTrip.miles,
     ...placeIdsForEdit(start, end),
+    stops: editStops.values(),
     duration_seconds: editingTrip.durationSeconds,
     vehicle_id: vehicleVal ? parseInt(vehicleVal) : null,
     business_id: businessVal ? parseInt(businessVal) : null,
@@ -1897,9 +2067,9 @@ function yearRowBlock(group) {
     rows.push([]);
   }
 
-  rows.push(['Start Location', 'End Location', 'Miles', 'Vehicle', 'Business', 'Trip Date', 'Start Time', 'End Time', 'Logged At', 'Notes']);
+  rows.push(['Start Location', 'Stops', 'End Location', 'Miles', 'Vehicle', 'Business', 'Trip Date', 'Start Time', 'End Time', 'Logged At', 'Notes']);
   group.trips.forEach(t => rows.push([
-    t.start, t.end, t.miles ?? '',
+    t.start, stopsText(t), t.end, t.miles ?? '',
     t.vehicle_name  || '',
     t.business_name || '',
     t.trip_date    || '',
@@ -1908,7 +2078,7 @@ function yearRowBlock(group) {
     t.timestamp,
     t.notes        || ''
   ]));
-  rows.push(['', 'TOTAL', round2(yearMiles), '', '', '', '', '', '', '']);
+  rows.push(['', '', 'TOTAL', round2(yearMiles), '', '', '', '', '', '', '']);
   return rows;
 }
 
@@ -1939,7 +2109,7 @@ function exportExcel() {
     rows.push(...yearRowBlock(group));
 
     const ws = XLSX.utils.aoa_to_sheet(rows);
-    ws['!cols'] = [{ wch: 34 }, { wch: 34 }, { wch: 8 }, { wch: 18 }, { wch: 18 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 22 }, { wch: 46 }];
+    ws['!cols'] = [{ wch: 34 }, { wch: 40 }, { wch: 34 }, { wch: 8 }, { wch: 18 }, { wch: 18 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 22 }, { wch: 46 }];
     const sheetName = group.year === 'Unknown' ? 'Unknown Year' : group.year;
     XLSX.utils.book_append_sheet(wb, ws, sheetName);
   });
@@ -1950,6 +2120,10 @@ function exportExcel() {
 // Trips are grouped by year for the PDF export (one page per year). A trip's
 // year comes from its trip_date when set, else the year embedded in its
 // "MMM DD, YYYY h:mm AM/PM" logged-at timestamp string.
+// Stops for export, in visit order. "; " rather than an arrow: jsPDF's built-in
+// fonts have no glyph for "→" and would print garbage in its place.
+function stopsText(t) { return (t.stops || []).map(st => st.label).join('; '); }
+
 function businessSummary(trips) {
   if (!trips.some(t => t.business_name)) return [];
   return groupSummary(trips, t => t.business_name || 'No business');
@@ -2029,18 +2203,19 @@ function groupSummary(trips, labelOf) {
 // Sums to 268mm against the 269mm usable on landscape A4 (297mm less 14mm
 // margins), so it fills the page without overflowing it.
 const PDF_TRIP_COLUMN_STYLES = {
-  0: { cellWidth: 52 },                    // Start Location
-  1: { cellWidth: 52 },                    // End Location
-  2: { cellWidth: 16, halign: 'right' },   // Miles
-  3: { cellWidth: 32 },                    // Vehicle
-  4: { cellWidth: 22 },                    // Trip Date
-  5: { cellWidth: 17 },                    // Start Time
-  6: { cellWidth: 17 },                    // End Time
+  0: { cellWidth: 44 },                    // Start Location
+  1: { cellWidth: 42, overflow: 'linebreak' },  // Stops, wrapped like Notes
+  2: { cellWidth: 44 },                    // End Location
+  3: { cellWidth: 14, halign: 'right' },   // Miles
+  4: { cellWidth: 26 },                    // Vehicle
+  5: { cellWidth: 20 },                    // Trip Date
+  6: { cellWidth: 16 },                    // Start Time
+  7: { cellWidth: 16 },                    // End Time
   // Notes wrap onto as many lines as they need inside this width, growing the
   // row rather than spilling into the next column or off the page. A fixed
   // width is what makes wrapping possible: an auto-sized column would stretch
   // to the longest note and push the other columns off a landscape page.
-  7: { cellWidth: 60, overflow: 'linebreak' },  // Notes
+  8: { cellWidth: 46, overflow: 'linebreak' },  // Notes
 };
 
 function exportPDF() {
@@ -2132,16 +2307,16 @@ function exportPDF() {
 
       doc.autoTable({
         startY: tableStartY,
-        head: [['Start Location', 'End Location', 'Miles', 'Vehicle', 'Trip Date', 'Start Time', 'End Time', 'Notes']],
+        head: [['Start Location', 'Stops', 'End Location', 'Miles', 'Vehicle', 'Trip Date', 'Start Time', 'End Time', 'Notes']],
         body: bGroup.trips.map(t => [
-          t.start, t.end, t.miles ?? '',
+          t.start, stopsText(t), t.end, t.miles ?? '',
           t.vehicle_name || '',
           t.trip_date    || '',
           t.start_time   || '',
           t.end_time     || '',
           t.notes        || ''
         ]),
-        foot: [['', 'Subtotal', Math.round(bMiles * 100) / 100, '', '', '', '', '']],
+        foot: [['', '', 'Subtotal', Math.round(bMiles * 100) / 100, '', '', '', '', '']],
         headStyles:  { fillColor: [79, 70, 229], fontSize: 7, fontStyle: 'bold' },
         footStyles:  { fillColor: [238, 242, 255], textColor: [79, 70, 229], fontStyle: 'bold', fontSize: 7 },
         bodyStyles:  { fontSize: 7, valign: 'top' },
@@ -2155,7 +2330,7 @@ function exportPDF() {
     doc.autoTable({
       startY: tableStartY,
       body: [],
-      foot: [['', `${yearLabel} total`, Math.round(yearMiles * 100) / 100, '', '', '', '', '']],
+      foot: [['', '', `${yearLabel} total`, Math.round(yearMiles * 100) / 100, '', '', '', '', '']],
       showHead: 'never',
       headStyles:  { fillColor: [79, 70, 229], fontSize: 7, fontStyle: 'bold' },
       footStyles:  { fillColor: [238, 242, 255], textColor: [79, 70, 229], fontStyle: 'bold', fontSize: 7 },
