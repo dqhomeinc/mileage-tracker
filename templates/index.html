@@ -789,13 +789,20 @@ function applyTripDateTimeDefaults() {
 // since a page carried across midnight would otherwise treat today as the
 // future and refuse the trip.
 function refreshTripDateTimeDefaults() {
+  applyTripMaxDate();
+
+  // An end time means the user is logging a trip that is already over, so
+  // "now" has stopped being a sensible guess at when it started: restamping
+  // could push the start past the end, which elapsedSeconds() would read as
+  // an overnight trip and warn about. Leave the form alone from then on.
+  const endEl = document.getElementById('tripEndTime');
+  if (endEl && endEl._userSet && endEl.value) return;
+
   const dateEl = document.getElementById('tripDate');
   if (dateEl && dateEl._defaulted) dateEl.value = localToday();
 
   const timeEl = document.getElementById('tripStartTime');
   if (timeEl && timeEl._defaulted) timeEl.value = localNowTime();
-
-  applyTripMaxDate();
 }
 
 // pageshow covers a restore from the back/forward cache, where no script
@@ -1466,12 +1473,18 @@ setupVoice('voiceEnd',   'end',   'endConfirmBar',   'endConfirmText',   'endCon
 // Init time toggle state
 setTimeFormat(timeFormat);
 
+// Called once per field at load, and again after each logged trip to clear the
+// form for the next one. Clearing runs every time; the listeners are attached
+// only on the first call, or every trip logged in a sitting would leave another
+// copy of them on the field.
 function initTimeInput(id) {
   const el = document.getElementById(id);
   if (!el) return;
   el.value = '';
   el._userSet = false;
   el._defaulted = false;
+  if (el._timeInputWired) return;
+  el._timeInputWired = true;
   el.addEventListener('change', function() { this._userSet = true; this._defaulted = false; });
   // A half-typed time reads as an empty value and fires no 'change' yet, so
   // without this a restamp on returning to the page would land on a field the
