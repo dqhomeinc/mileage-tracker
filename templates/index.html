@@ -25,6 +25,9 @@
       --radius:     16px;
       --radius-sm:  10px;
       --shadow:     0 1px 3px rgba(0,0,0,.06), 0 4px 16px rgba(79,70,229,.08);
+      /* Width the trip history needs before its columns get cramped;
+         below it the history scrolls sideways instead. */
+      --trips-min-width: 600px;
     }
 
     *, *::before, *::after { box-sizing: border-box; }
@@ -245,8 +248,13 @@
     }
     .export-btn:hover { border-color: var(--primary); color: var(--primary); background: #EEF2FF; }
     @media (max-width: 480px) { .export-label { display: none; } }
+    /* Narrower than --trips-min-width the columns scroll sideways inside
+       #historyWrap rather than being dropped, so a phone can still reach
+       every column. */
+    #historyWrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
     .trips-header {
       display: grid; grid-template-columns: 130px 1fr 1fr 60px 68px;
+      min-width: var(--trips-min-width);
       gap: 8px; padding-bottom: 8px;
       font-size: 0.72rem; font-weight: 600; color: var(--muted);
       text-transform: uppercase; letter-spacing: 0.05em;
@@ -254,6 +262,7 @@
     }
     .trip-row {
       display: grid; grid-template-columns: 130px 1fr 1fr 60px 68px;
+      min-width: var(--trips-min-width);
       gap: 8px; align-items: start; padding: 11px 0;
       border-bottom: 1px solid var(--border); font-size: 0.85rem;
     }
@@ -357,13 +366,6 @@
       text-align: center; padding: 44px 0; color: var(--muted); font-size: 0.9rem;
     }
     .empty-icon { font-size: 2rem; display: block; margin-bottom: 10px; opacity: 0.2; }
-
-    @media (max-width: 560px) {
-      /* Narrow screens drop the date column, which is now the first child
-         rather than the fourth; the rest keep their order. */
-      .trips-header, .trip-row { grid-template-columns: 1fr 1fr 60px 68px; }
-      .trips-header > :nth-child(1), .trip-row > :nth-child(1) { display: none; }
-    }
 
     /* ── Trip form extra fields ──────────────── */
     .trip-extras { margin-top: 16px; padding-top: 16px; border-top: 1.5px solid var(--border); }
