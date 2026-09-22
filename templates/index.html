@@ -246,14 +246,14 @@
     .export-btn:hover { border-color: var(--primary); color: var(--primary); background: #EEF2FF; }
     @media (max-width: 480px) { .export-label { display: none; } }
     .trips-header {
-      display: grid; grid-template-columns: 1fr 1fr 60px 130px 68px;
+      display: grid; grid-template-columns: 130px 1fr 1fr 60px 68px;
       gap: 8px; padding-bottom: 8px;
       font-size: 0.72rem; font-weight: 600; color: var(--muted);
       text-transform: uppercase; letter-spacing: 0.05em;
       border-bottom: 1.5px solid var(--border);
     }
     .trip-row {
-      display: grid; grid-template-columns: 1fr 1fr 60px 130px 68px;
+      display: grid; grid-template-columns: 130px 1fr 1fr 60px 68px;
       gap: 8px; align-items: start; padding: 11px 0;
       border-bottom: 1px solid var(--border); font-size: 0.85rem;
     }
@@ -359,8 +359,10 @@
     .empty-icon { font-size: 2rem; display: block; margin-bottom: 10px; opacity: 0.2; }
 
     @media (max-width: 560px) {
+      /* Narrow screens drop the date column, which is now the first child
+         rather than the fourth; the rest keep their order. */
       .trips-header, .trip-row { grid-template-columns: 1fr 1fr 60px 68px; }
-      .trips-header > :nth-child(4), .trip-row > :nth-child(4) { display: none; }
+      .trips-header > :nth-child(1), .trip-row > :nth-child(1) { display: none; }
     }
 
     /* ── Trip form extra fields ──────────────── */
@@ -1694,7 +1696,7 @@ function prependTripRow(trip, prepend = true) {
     const hdr = document.createElement('div');
     hdr.className = 'trips-header';
     hdr.id = 'tripsHeader';
-    hdr.innerHTML = '<span>Start</span><span>End</span><span>Miles</span><span>Date / Time</span><span></span>';
+    hdr.innerHTML = '<span>Date / Time</span><span>Start</span><span>End</span><span>Miles</span><span></span>';
     wrap.insertBefore(hdr, wrap.firstChild);
     headerInserted = true;
   }
@@ -1724,6 +1726,10 @@ function prependTripRow(trip, prepend = true) {
   row.dataset.startPlaceId = trip.start_place_id || '';
   row.dataset.endPlaceId   = trip.end_place_id   || '';
   row.innerHTML = `
+    <div class="trip-date">
+      <div class="trip-date-main">${dateTxt}</div>
+      <div class="trip-time-display trip-sub" data-raw-start="${escHtml(trip.start_time||'')}" data-raw-end="${escHtml(trip.end_time||'')}">${timeRangeTxt}</div>
+    </div>
     <div class="trip-loc">
       <div class="trip-loc-main" title="${escHtml(trip.start)}">${escHtml(trip.start)}</div>
       <div class="trip-vehicle-sub trip-sub" style="${trip.vehicle_name ? '' : 'display:none'}">${escHtml(trip.vehicle_name || '')}</div>
@@ -1734,10 +1740,6 @@ function prependTripRow(trip, prepend = true) {
       <div class="trip-note-text" style="${trip.notes ? '' : 'display:none'}">${escHtml(trip.notes || '')}</div>
     </div>
     <div class="trip-mi">${milesDisplay(trip.miles)}</div>
-    <div class="trip-date">
-      <div class="trip-date-main">${dateTxt}</div>
-      <div class="trip-time-display trip-sub" data-raw-start="${escHtml(trip.start_time||'')}" data-raw-end="${escHtml(trip.end_time||'')}">${timeRangeTxt}</div>
-    </div>
     <div class="trip-actions">
       <button class="trip-edit" onclick="openEditModal(${trip.id})" title="Edit trip">
         <i class="fas fa-pencil-alt"></i>
