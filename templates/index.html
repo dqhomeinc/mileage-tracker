@@ -780,6 +780,38 @@ function applyTripDateTimeDefaults() {
   }
 }
 
+// The stamp above is only as fresh as the last time it ran, and a phone user
+// rarely reloads: the page is opened, backgrounded while the trip is driven,
+// and brought back hours later, when a trip logged from it would carry the
+// time the page was opened. Restamp whenever the page becomes visible again,
+// but only fields still holding the page's own value — anything the user
+// picked is theirs to keep. Today's date is re-derived at the same moment,
+// since a page carried across midnight would otherwise treat today as the
+// future and refuse the trip.
+function refreshTripDateTimeDefaults() {
+  applyTripMaxDate();
+
+  // An end time means the user is logging a trip that is already over, so
+  // "now" has stopped being a sensible guess at when it started: restamping
+  // could push the start past the end, which elapsedSeconds() would read as
+  // an overnight trip and warn about. Leave the form alone from then on.
+  const endEl = document.getElementById('tripEndTime');
+  if (endEl && endEl._userSet && endEl.value) return;
+
+  const dateEl = document.getElementById('tripDate');
+  if (dateEl && dateEl._defaulted) dateEl.value = localToday();
+
+  const timeEl = document.getElementById('tripStartTime');
+  if (timeEl && timeEl._defaulted) timeEl.value = localNowTime();
+}
+
+// pageshow covers a restore from the back/forward cache, where no script
+// re-runs at all; visibilitychange covers tab and app switching.
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) refreshTripDateTimeDefaults();
+});
+window.addEventListener('pageshow', refreshTripDateTimeDefaults);
+
 let businessesList = [];
 
 async function loadBusinesses() {
@@ -1441,13 +1473,25 @@ setupVoice('voiceEnd',   'end',   'endConfirmBar',   'endConfirmText',   'endCon
 // Init time toggle state
 setTimeFormat(timeFormat);
 
+// Called once per field at load, and again after each logged trip to clear the
+// form for the next one. Clearing runs every time; the listeners are attached
+// only on the first call, or every trip logged in a sitting would leave another
+// copy of them on the field.
 function initTimeInput(id) {
   const el = document.getElementById(id);
   if (!el) return;
   el.value = '';
   el._userSet = false;
   el._defaulted = false;
+  if (el._timeInputWired) return;
+  el._timeInputWired = true;
   el.addEventListener('change', function() { this._userSet = true; this._defaulted = false; });
+  // A half-typed time reads as an empty value and fires no 'change' yet, so
+  // without this a restamp on returning to the page would land on a field the
+  // user was partway through and throw the entry away. Only _defaulted is
+  // cleared here: _userSet means a value worth submitting, which a partial
+  // entry is not, and 'change' sets that once the time is complete.
+  el.addEventListener('input', function() { this._defaulted = false; });
 }
 
 function getTimeValue(id) {
@@ -1506,11 +1550,16 @@ function localNowTime() {
   const d = new Date();
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
-const TODAY_ISO = localToday();
-['tripDate', 'editTripDate'].forEach(id => {
-  const el = document.getElementById(id);
-  if (el) el.max = TODAY_ISO;
-});
+// Deliberately a function, not a constant: a value cached at load is wrong
+// for any page still open after midnight.
+function applyTripMaxDate() {
+  const today = localToday();
+  ['tripDate', 'editTripDate'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.max = today;
+  });
+}
+applyTripMaxDate();
 
 // Blocking check used by both the new-trip and edit-trip forms: a trip date
 // is optional, but if set it must be a real calendar date (JS's Date
@@ -1525,7 +1574,7 @@ function validateTripDate(value) {
   if (dt.getFullYear() !== y || dt.getMonth() !== mo - 1 || dt.getDate() !== d) {
     return 'Please enter a valid date.';
   }
-  if (value > TODAY_ISO) return 'Trip date cannot be in the future.';
+  if (value > localToday()) return 'Trip date cannot be in the future.';
   return null;
 }
 
@@ -1591,7 +1640,10 @@ document.getElementById('tripVehicle').addEventListener('change', () => vehicleH
 // is what decides whether a draft keeps it.
 ['tripVehicle', 'tripBusiness'].forEach(id =>
   document.getElementById(id).addEventListener('change', e => { e.target._userSet = true; }));
-document.getElementById('tripDate').addEventListener('change', e => { e.target._defaulted = false; });
+// 'input' as well as 'change': a date is entered component by component, and
+// a restamp must not land on one the user is partway through typing.
+['input', 'change'].forEach(ev =>
+  document.getElementById('tripDate').addEventListener(ev, e => { e.target._defaulted = false; }));
 document.getElementById('editVehicle').addEventListener('change', () => vehicleHintChange('editVehicle', 'editVehicleHint'));
 
 
@@ -1625,7 +1677,7 @@ document.getElementById('logTripBtn').addEventListener('click', async () => {
     trip_date:  document.getElementById('tripDate').value      || null,
     start_time: getTimeValue('tripStartTime'),
     end_time:   getTimeValue('tripEndTime'),
-    client_today: TODAY_ISO,
+    client_today: localToday(),
   };
 
   try {
@@ -2029,7 +2081,7 @@ async function saveEdit() {
     trip_date:  document.getElementById('editTripDate').value  || null,
     start_time: getTimeValue('editStartTime'),
     end_time:   getTimeValue('editEndTime'),
-    client_today: TODAY_ISO,
+    client_today: localToday(),
   };
 
   btn.disabled = true;
