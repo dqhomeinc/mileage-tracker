@@ -656,6 +656,10 @@
       <i class="fas fa-triangle-exclamation"></i>
       <span id="editSpeedWarningText"></span>
     </div>
+    <div class="speed-warning" id="editPlaceWarning">
+      <i class="fas fa-location-dot"></i>
+      <span id="editPlaceWarningText"></span>
+    </div>
     </div>
     <div class="modal-footer">
       <button class="btn-modal-cancel" onclick="closeEditModal()">Cancel</button>
@@ -986,7 +990,11 @@ function looksLikeStreetAddress(text) {
   if (!t) return true;
   if (/^\d+\s/.test(t)) return true;               // "4400 Sharon Road"
   if (/\b\d{5}(-\d{4})?\b/.test(t)) return true;   // has a ZIP
-  return STREET_SUFFIXES.test(t);
+  // A street suffix alone is not enough: plenty of businesses end in Court,
+  // Place or Way, and treating those as addresses swallowed the warning for
+  // exactly the names it is meant to catch. A street with no number geocodes
+  // to the middle of the street anyway, so it is worth warning about too.
+  return /\d/.test(t) && STREET_SUFFIXES.test(t);
 }
 
 // Place ID of the suggestion the user picked for each field, keyed by input id.
@@ -1015,7 +1023,7 @@ function setupAutocomplete(inputId, dropdownId) {
     // Typing invalidates any previously picked suggestion — the text no longer
     // describes that place, so fall back to address routing until they pick again.
     selectedPlaceIds[inputId] = null;
-    updatePlaceWarning();
+    refreshPlaceWarnings();
     const q = input.value.trim();
     // Recent addresses need no request, so show them straight away rather than
     // making the user wait out a debounce meant for the Places call.
@@ -1148,7 +1156,7 @@ function applySuggestion(input, dropdown, label, placeId) {
   input.value = label;
   selectedPlaceIds[input.id] = placeId || null;
   hideDropdown(dropdown);
-  updatePlaceWarning();
+  refreshPlaceWarnings();
 }
 
 // Places Autocomplete (New). Only the placeId and the display text are used.
@@ -1169,16 +1177,65 @@ function applySuggestion(input, dropdown, label, placeId) {
 // geocodes the text with nothing to go on, so "Home Depot" can land on any
 // branch. Say so rather than blocking — the text may well be a real address
 // the autocomplete never offered, and the distance is still worth having.
+// Every location on a trip is routed the same way, so every one of them —
+// start, end and each stop, on the new-trip form and in the edit modal — is
+// checked by the same rule. A stop routed by name is as wrong as an endpoint
+// routed by name, and the edit modal is where a trip logged that way gets
+// looked at again.
+function namedLocations(fields) {
+  return fields
+    .filter(f => f.value && !f.placeId && !looksLikeStreetAddress(f.value))
+    .map(f => f.name);
+}
+
+function placeWarningText(names) {
+  if (!names.length) return null;
+  const list = names.length === 1 ? names[0]
+    : names.slice(0, -1).join(', ') + ' and ' + names[names.length - 1];
+  return `Pick the ${list} location${names.length > 1 ? 's' : ''} from the suggestions ` +
+         `for an exact distance — a name on its own can match a different branch ` +
+         `than the one you meant.`;
+}
+
+// Reads the live fields rather than a snapshot: stops are added and removed
+// while the form is open, so the row list is whatever is on screen now.
+function tripLocationFields() {
+  const fields = ['start', 'end'].map(id => ({
+    name: id, value: document.getElementById(id).value.trim(), placeId: selectedPlaceIds[id],
+  }));
+  tripStops.values().forEach((st, i) => fields.splice(1 + i, 0, {
+    name: `stop ${i + 1}`, value: st.label, placeId: st.place_id,
+  }));
+  return fields;
+}
+
 function updatePlaceWarning() {
-  const named = ['start', 'end'].filter(id => {
-    const v = document.getElementById(id).value.trim();
-    return v && !selectedPlaceIds[id] && !looksLikeStreetAddress(v);
-  });
-  const msg = named.length
-    ? `Pick ${named.length > 1 ? 'the start and end' : 'the ' + named[0]} location from the suggestions ` +
-      `for an exact distance — a name on its own can match a different branch than the one you meant.`
-    : null;
-  updateSpeedWarning('tripPlaceWarning', 'tripPlaceWarningText', msg);
+  updateSpeedWarning('tripPlaceWarning', 'tripPlaceWarningText',
+                     placeWarningText(namedLocations(tripLocationFields())));
+}
+
+// setupAutocomplete drives the fields of both forms, so it cannot know which
+// one a given input belongs to. Refresh both; the edit one is a no-op unless
+// the modal is open.
+function refreshPlaceWarnings() {
+  updatePlaceWarning();
+  updateEditPlaceWarning();
+}
+
+// The edit modal keeps each stored place ID until its text is edited, which is
+// what placeIdsForEdit encodes — so ask it rather than reading selectedPlaceIds,
+// or a location reopened unchanged would look like it was typed by hand.
+function updateEditPlaceWarning() {
+  if (!editingTrip) return;
+  const start = document.getElementById('editStart').value.trim();
+  const end   = document.getElementById('editEnd').value.trim();
+  const ids   = placeIdsForEdit(start, end);
+  const fields = [{ name: 'start', value: start, placeId: ids.start_place_id }];
+  editStops.values().forEach((st, i) =>
+    fields.push({ name: `stop ${i + 1}`, value: st.label, placeId: st.place_id }));
+  fields.push({ name: 'end', value: end, placeId: ids.end_place_id });
+  updateSpeedWarning('editPlaceWarning', 'editPlaceWarningText',
+                     placeWarningText(namedLocations(fields)));
 }
 
 // Both Places calls send the same body, so the bias is applied in one place
@@ -1304,6 +1361,7 @@ function stopsEditor(listId, addBtnId, variant) {
     delete selectedPlaceIds[row.querySelector('input').id];
     row.remove();
     refresh();
+    refreshPlaceWarnings();
   }
 
   function add(label = '', placeId = null) {
@@ -1337,6 +1395,7 @@ function stopsEditor(listId, addBtnId, variant) {
     // keeps its place ID until its text is edited, exactly like start and end.
     selectedPlaceIds[id] = placeId || null;
 
+    refreshPlaceWarnings();
     row.querySelector('.stop-actions').addEventListener('click', (e) => {
       const act = e.target.closest('[data-act]')?.dataset.act;
       if (act === 'remove') remove(row);
@@ -1704,7 +1763,7 @@ document.getElementById('logTripBtn').addEventListener('click', async () => {
 
     setLocationText(document.getElementById('start'), '');
     setLocationText(document.getElementById('end'),   '');
-    updatePlaceWarning();
+    refreshPlaceWarnings();
     tripStops.clear();
     document.getElementById('start').classList.remove('is-valid');
     document.getElementById('end').classList.remove('is-valid');
@@ -1979,6 +2038,7 @@ function openEditModal(id) {
     el._userSet = !!val;
   });
   checkEditSpeedLive();
+  updateEditPlaceWarning();
 
   document.getElementById('editModal').classList.add('open');
 }
@@ -1988,6 +2048,7 @@ function closeEditModal() {
   editingTrip = null;
   editStops.clear();
   updateSpeedWarning('editSpeedWarning', 'editSpeedWarningText', null);
+  updateSpeedWarning('editPlaceWarning', 'editPlaceWarningText', null);
 }
 
 document.getElementById('editModal').addEventListener('click', (e) => {

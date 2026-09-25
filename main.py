@@ -388,8 +388,10 @@ ROUTES_API_URL = 'https://routes.googleapis.com/directions/v2:computeRoutes'
 # mask, so these leg coordinates bill the same Essentials SKU as distance and
 # duration alone. They are what lets the client bias address autocomplete
 # toward where the user actually drives; see /calculate.
-ROUTES_FIELD_MASK = ('routes.distanceMeters,routes.duration,'
-                     'routes.legs.startLocation,routes.legs.endLocation')
+ROUTES_FIELD_MASK = (
+    'routes.distanceMeters,routes.duration,'
+    'routes.legs.startLocation,routes.legs.endLocation'
+)
 
 METERS_PER_MILE = 1609.344
 
