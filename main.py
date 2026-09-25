@@ -453,7 +453,11 @@ def calculate_driving_miles(start_text, end_text,
         )
 
     route = routes[0]
-    miles = round(route['distanceMeters'] / METERS_PER_MILE, 2)
+    # Routes omits distanceMeters entirely when it is zero, so a trip whose two
+    # ends resolve to the same point comes back as {'duration': '0s'} and a
+    # direct subscript raises. Easy to hit with named locations: two different
+    # names for one site, or a name that geocodes onto the other endpoint.
+    miles = round(route.get('distanceMeters', 0) / METERS_PER_MILE, 2)
     return miles, _parse_route_duration(route.get('duration'))
 
 
