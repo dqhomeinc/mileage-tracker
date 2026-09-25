@@ -383,9 +383,13 @@ def _mail_config_ok():
 
 ROUTES_API_URL = 'https://routes.googleapis.com/directions/v2:computeRoutes'
 
-# Only the two fields we use — Routes bills on the field mask, and requesting
-# anything beyond distance/duration moves the call to a pricier SKU.
-ROUTES_FIELD_MASK = 'routes.distanceMeters,routes.duration'
+# Only the fields we use. The SKU is set by the features a request uses —
+# traffic-aware routing, more than 10 waypoints, two-wheel — not by the field
+# mask, so these leg coordinates bill the same Essentials SKU as distance and
+# duration alone. They are what lets the client bias address autocomplete
+# toward where the user actually drives; see /calculate.
+ROUTES_FIELD_MASK = ('routes.distanceMeters,routes.duration,'
+                     'routes.legs.startLocation,routes.legs.endLocation')
 
 METERS_PER_MILE = 1609.344
 
@@ -405,10 +409,25 @@ def _parse_route_duration(value):
         return None
 
 
+def _leg_latlng(route, which):
+    """{'lat': .., 'lng': ..} for the first leg's start or the last leg's end,
+    or None if Routes didn't return it."""
+    legs = route.get('legs') or []
+    if not legs:
+        return None
+    leg = legs[0] if which == 'start' else legs[-1]
+    pt = (leg.get('startLocation' if which == 'start' else 'endLocation') or {}).get('latLng') or {}
+    if 'latitude' not in pt or 'longitude' not in pt:
+        return None
+    return {'lat': pt['latitude'], 'lng': pt['longitude']}
+
+
 def calculate_driving_miles(start_text, end_text,
                             start_place_id=None, end_place_id=None, stops=None):
-    """(miles, duration_seconds) for the driving route between two points,
-    through any stops in the order given. The duration is driving time only.
+    """(miles, duration_seconds, endpoints) for the driving route between two
+    points, through any stops in the order given. endpoints holds the resolved
+    'start'/'end' coordinates, either of which may be None.
+    The duration is driving time only.
 
     Raises ValueError when the route can't be determined — the caller turns
     that into a user-facing message.
@@ -458,7 +477,8 @@ def calculate_driving_miles(start_text, end_text,
     # direct subscript raises. Easy to hit with named locations: two different
     # names for one site, or a name that geocodes onto the other endpoint.
     miles = round(route.get('distanceMeters', 0) / METERS_PER_MILE, 2)
-    return miles, _parse_route_duration(route.get('duration'))
+    endpoints = {'start': _leg_latlng(route, 'start'), 'end': _leg_latlng(route, 'end')}
+    return miles, _parse_route_duration(route.get('duration')), endpoints
 
 
 def _elapsed_seconds(start_time, end_time):
@@ -718,7 +738,7 @@ def calculate():
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
     try:
-        miles, duration_seconds = calculate_driving_miles(
+        miles, duration_seconds, endpoints = calculate_driving_miles(
             start, end,
             start_place_id=(data.get('start_place_id') or None),
             end_place_id=(data.get('end_place_id') or None),
@@ -733,6 +753,12 @@ def calculate():
         'start': start,
         'end': end,
         'duration_seconds': duration_seconds,
+        # Where these two locations actually resolved to. The client keeps the
+        # latest pair so it can bias address autocomplete toward the user's own
+        # area: unbiased, a query like "Home Depot" is resolved against the
+        # requester's IP and can land on a different branch — or a different
+        # state — than the one they meant.
+        'endpoints': endpoints,
     })
 
 
@@ -826,11 +852,12 @@ def log_trip():
     distance_miles   = data.get('distance_miles')
     duration_seconds = data.get('duration_seconds')
     distance_error   = None
+    endpoints        = None
     if distance_miles is not None:
         distance_miles = float(distance_miles)
     else:
         try:
-            distance_miles, duration_seconds = calculate_driving_miles(
+            distance_miles, duration_seconds, endpoints = calculate_driving_miles(
                 start, end,
                 start_place_id=start_place_id,
                 end_place_id=end_place_id,
@@ -880,6 +907,10 @@ def log_trip():
     db.session.add(trip)
     db.session.commit()
     resp = {'success': True, 'trip': _trip_dict(trip, vehicle_name, vehicle_sub, business_name)}
+    # Same purpose as /calculate's: the client keeps the latest resolved
+    # coordinates so address autocomplete can be biased to the user's own area.
+    if endpoints:
+        resp['endpoints'] = endpoints
     if warning:
         resp['warning'] = warning
     if distance_error:

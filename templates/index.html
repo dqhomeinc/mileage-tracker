@@ -474,6 +474,10 @@
         <button class="confirm-yes" id="endConfirmYes">&#10003; Correct</button>
         <button class="confirm-edit" id="endConfirmEdit">&#9998; Edit</button>
       </div>
+      <div class="speed-warning" id="tripPlaceWarning">
+        <i class="fas fa-location-dot"></i>
+        <span id="tripPlaceWarningText"></span>
+      </div>
     </div>
 
     <div class="trip-extras">
@@ -948,6 +952,43 @@ const AUTOCOMPLETE_MIN_CHARS   = 5;
 const RECENT_MIN_CHARS = 2;
 const RECENT_MAX       = 3;
 
+// Where this user's trips actually happen, remembered from the last route the
+// server resolved. Without it Places resolves a bare name like "Home Depot"
+// against the requester's IP, which picks a branch by network location rather
+// than by where the user drives — a few miles off in the same city at best,
+// another state at worst. Per-device and non-essential, so a browser that
+// refuses storage just gets unbiased suggestions.
+const BIAS_KEY = 'tripBiasCenter';
+// Roughly a metro area, and the maximum a Places circle bias accepts.
+const BIAS_RADIUS_M = 50000;
+
+function rememberBiasCenter(endpoints) {
+  const pts = [endpoints?.start, endpoints?.end].filter(p => p && typeof p.lat === 'number');
+  if (!pts.length) return;
+  const center = { lat: pts.reduce((a, p) => a + p.lat, 0) / pts.length,
+                   lng: pts.reduce((a, p) => a + p.lng, 0) / pts.length };
+  try { localStorage.setItem(BIAS_KEY, JSON.stringify(center)); } catch { /* non-essential */ }
+}
+
+function autocompleteBias() {
+  let c;
+  try { c = JSON.parse(localStorage.getItem(BIAS_KEY) || 'null'); } catch { return null; }
+  if (!c || typeof c.lat !== 'number' || typeof c.lng !== 'number') return null;
+  return { circle: { center: { latitude: c.lat, longitude: c.lng }, radius: BIAS_RADIUS_M } };
+}
+
+// A location routed by text rather than a place ID is geocoded server-side,
+// where there is no user to bias toward. That is accurate for a street address
+// and a coin toss for a chain name, so the two are told apart before warning.
+const STREET_SUFFIXES = /\b(st|street|ave|avenue|rd|road|dr|drive|ln|lane|blvd|boulevard|way|ct|court|cir|circle|pkwy|parkway|hwy|highway|ter|terrace|pl|place|trail|trl|loop|pike)\b\.?/i;
+function looksLikeStreetAddress(text) {
+  const t = (text || '').trim();
+  if (!t) return true;
+  if (/^\d+\s/.test(t)) return true;               // "4400 Sharon Road"
+  if (/\b\d{5}(-\d{4})?\b/.test(t)) return true;   // has a ZIP
+  return STREET_SUFFIXES.test(t);
+}
+
 // Place ID of the suggestion the user picked for each field, keyed by input id.
 // Null whenever the text was typed or dictated rather than chosen, in which
 // case the server routes by address string instead.
@@ -974,6 +1015,7 @@ function setupAutocomplete(inputId, dropdownId) {
     // Typing invalidates any previously picked suggestion — the text no longer
     // describes that place, so fall back to address routing until they pick again.
     selectedPlaceIds[inputId] = null;
+    updatePlaceWarning();
     const q = input.value.trim();
     // Recent addresses need no request, so show them straight away rather than
     // making the user wait out a debounce meant for the Places call.
@@ -1106,6 +1148,7 @@ function applySuggestion(input, dropdown, label, placeId) {
   input.value = label;
   selectedPlaceIds[input.id] = placeId || null;
   hideDropdown(dropdown);
+  updatePlaceWarning();
 }
 
 // Places Autocomplete (New). Only the placeId and the display text are used.
@@ -1122,6 +1165,29 @@ function applySuggestion(input, dropdown, label, placeId) {
 // than simply returning nothing — the exact silent-wrong-place failure this
 // migration set out to remove. Results are already biased toward the user's
 // location by their IP, so nearby matches surface without the hard filter.
+// A name with no place ID is the case that silently mismeasures: the server
+// geocodes the text with nothing to go on, so "Home Depot" can land on any
+// branch. Say so rather than blocking — the text may well be a real address
+// the autocomplete never offered, and the distance is still worth having.
+function updatePlaceWarning() {
+  const named = ['start', 'end'].filter(id => {
+    const v = document.getElementById(id).value.trim();
+    return v && !selectedPlaceIds[id] && !looksLikeStreetAddress(v);
+  });
+  const msg = named.length
+    ? `Pick ${named.length > 1 ? 'the start and end' : 'the ' + named[0]} location from the suggestions ` +
+      `for an exact distance — a name on its own can match a different branch than the one you meant.`
+    : null;
+  updateSpeedWarning('tripPlaceWarning', 'tripPlaceWarningText', msg);
+}
+
+// Both Places calls send the same body, so the bias is applied in one place
+// rather than remembered separately at each call site.
+function placesBody(query) {
+  const bias = autocompleteBias();
+  return bias ? { input: query, locationBias: bias } : { input: query };
+}
+
 function fetchSuggestions(query, input, dropdown) {
   fetch('https://places.googleapis.com/v1/places:autocomplete', {
     method: 'POST',
@@ -1129,7 +1195,7 @@ function fetchSuggestions(query, input, dropdown) {
       'Content-Type': 'application/json',
       'X-Goog-Api-Key': MAPS_BROWSER_KEY,
     },
-    body: JSON.stringify({ input: query })
+    body: JSON.stringify(placesBody(query))
   })
     .then(r => {
       // An error status still carries a JSON body, so without this check a 403
@@ -1351,7 +1417,7 @@ function setupVoice(buttonId, inputId, confirmBarId, confirmTextId, confirmYesId
         'Content-Type': 'application/json',
         'X-Goog-Api-Key': MAPS_BROWSER_KEY,
       },
-      body: JSON.stringify({ input: transcript })
+      body: JSON.stringify(placesBody(transcript))
     })
       .then(r => {
         if (!r.ok) throw new Error(`Places autocomplete failed: HTTP ${r.status}`);
@@ -1633,10 +1699,12 @@ document.getElementById('logTripBtn').addEventListener('click', async () => {
     const data = await resp.json();
     if (!resp.ok) { showError(data.error || 'Failed to log trip.'); return; }
 
+    rememberBiasCenter(data.endpoints);
     await loadHistory();
 
     setLocationText(document.getElementById('start'), '');
     setLocationText(document.getElementById('end'),   '');
+    updatePlaceWarning();
     tripStops.clear();
     document.getElementById('start').classList.remove('is-valid');
     document.getElementById('end').classList.remove('is-valid');
@@ -1955,6 +2023,7 @@ async function fetchEditDistance(start, end) {
     });
     const data = await resp.json();
     if (resp.ok) {
+      rememberBiasCenter(data.endpoints);
       editingTrip.miles = data.distance_miles;
       editingTrip.durationSeconds = data.duration_seconds;
       editingTrip.calcStart = start;
