@@ -135,6 +135,17 @@
     /* ── Route connector ─────────────────────── */
     .stops-list { display: flex; flex-direction: column; gap: 8px; }
     .stops-list:empty { display: none; }
+    /* Every location on a trip is one of these rows. Which one is the start and
+       which the end is a matter of position, so the badge is rendered from the
+       row's index and re-rendered whenever the order changes. */
+    .loc-badge {
+      flex-shrink: 0; width: 46px; padding: 2px 0; margin-top: 6px;
+      font-size: .58rem; font-weight: 700; letter-spacing: .04em;
+      text-transform: uppercase; text-align: center; border-radius: 5px;
+      background: #F1F5F9; color: var(--muted);
+    }
+    .loc-badge.is-start { background: #ECFDF5; color: #047857; }
+    .loc-badge.is-end   { background: #FEF2F2; color: #B91C1C; }
     .stop-row { display: flex; align-items: flex-start; gap: 6px; }
     .stop-row .stop-field { flex: 1 1 auto; min-width: 0; }
     .stop-actions { display: flex; gap: 2px; padding-top: 7px; flex-shrink: 0; }
@@ -158,14 +169,6 @@
       font-size: .72rem; color: var(--muted); margin-top: 2px;
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
-    .route-divider {
-      display: flex; align-items: center; gap: 10px;
-      margin: 10px 0; color: #CBD5E1; font-size: 0.75rem;
-    }
-    .route-divider::before, .route-divider::after {
-      content: ''; flex: 1; height: 1px; background: var(--border);
-    }
-
     /* ── Voice confirm bar ───────────────────── */
     .confirm-bar {
       display: none; align-items: center; gap: 8px;
@@ -435,49 +438,14 @@
     </div>
 
     <div style="margin-bottom:16px">
-      <label class="field-label" for="start">Start Location</label>
-      <div class="autocomplete-wrapper">
-        <div class="input-row">
-          <span class="loc-icon"><i class="fas fa-circle" style="color:#10B981;font-size:.45rem"></i></span>
-          <input type="text" id="start" class="loc-input" placeholder="Where are you starting?" autocomplete="off">
-          <button class="mic-btn" type="button" id="voiceStart" title="Voice input">
-            <i class="fas fa-microphone"></i>
-          </button>
-        </div>
-        <div class="autocomplete-dropdown d-none" id="startDropdown"></div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+        <label class="field-label" style="margin-bottom:0">Route</label>
+        <span class="vehicle-hint" id="routeHint" style="margin-top:0"></span>
       </div>
-      <div class="confirm-bar" id="startConfirmBar">
-        <i class="fas fa-map-marker-alt" style="color:#F59E0B;flex-shrink:0;font-size:.8rem"></i>
-        <span class="confirm-text" id="startConfirmText"></span>
-        <button class="confirm-yes" id="startConfirmYes">&#10003; Correct</button>
-        <button class="confirm-edit" id="startConfirmEdit">&#9998; Edit</button>
-      </div>
-    </div>
-
-    <div class="route-divider"><i class="fas fa-arrow-down"></i></div>
-
-    <div class="stops-list" id="tripStops"></div>
-    <button type="button" class="btn-add-stop" id="tripAddStop"><i class="fas fa-plus"></i> Add stop</button>
-    <div class="route-divider"><i class="fas fa-arrow-down"></i></div>
-
-    <div>
-      <label class="field-label" for="end">End Location</label>
-      <div class="autocomplete-wrapper">
-        <div class="input-row">
-          <span class="loc-icon"><i class="fas fa-map-marker-alt" style="color:#EF4444;font-size:.75rem"></i></span>
-          <input type="text" id="end" class="loc-input" placeholder="Where are you going?" autocomplete="off">
-          <button class="mic-btn" type="button" id="voiceEnd" title="Voice input">
-            <i class="fas fa-microphone"></i>
-          </button>
-        </div>
-        <div class="autocomplete-dropdown d-none" id="endDropdown"></div>
-      </div>
-      <div class="confirm-bar" id="endConfirmBar">
-        <i class="fas fa-map-marker-alt" style="color:#F59E0B;flex-shrink:0;font-size:.8rem"></i>
-        <span class="confirm-text" id="endConfirmText"></span>
-        <button class="confirm-yes" id="endConfirmYes">&#10003; Correct</button>
-        <button class="confirm-edit" id="endConfirmEdit">&#9998; Edit</button>
-      </div>
+      <!-- Filled by routeEditor: every location is an identical row, and which
+           one counts as the start or the end follows its position in the list. -->
+      <div class="stops-list" id="tripRoute"></div>
+      <button type="button" class="btn-add-stop" id="tripAddStop"><i class="fas fa-plus"></i> Add stop</button>
       <div class="speed-warning" id="tripPlaceWarning">
         <i class="fas fa-location-dot"></i>
         <span id="tripPlaceWarningText"></span>
@@ -598,23 +566,9 @@
     </div>
     <div class="modal-body">
     <div class="modal-field">
-      <label>Start Location</label>
-      <div class="autocomplete-wrapper">
-        <input type="text" id="editStart" autocomplete="off" placeholder="Start location">
-        <div class="autocomplete-dropdown d-none" id="editStartDropdown"></div>
-      </div>
-    </div>
-    <div class="modal-field">
-      <label>Stops</label>
-      <div class="stops-list" id="editStops"></div>
+      <label>Route</label>
+      <div class="stops-list" id="editRoute"></div>
       <button type="button" class="btn-add-stop" id="editAddStop"><i class="fas fa-plus"></i> Add stop</button>
-    </div>
-    <div class="modal-field">
-      <label>End Location</label>
-      <div class="autocomplete-wrapper">
-        <input type="text" id="editEnd" autocomplete="off" placeholder="End location">
-        <div class="autocomplete-dropdown d-none" id="editEndDropdown"></div>
-      </div>
     </div>
     <div style="font-size:.73rem;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">Distance</div>
     <div class="modal-dist-row">
@@ -891,15 +845,19 @@ const TRIP_DRAFT_KEY = 'tripFormDraft';
 
 function saveTripDraft() {
   const el = id => document.getElementById(id);
+  // Every row, blanks included, because a label's position is what makes it the
+  // start or the end. Dropping blanks first would slide the rest up: an address
+  // typed into the end row of an otherwise empty form would come back as the
+  // start, silently changing which way the trip ran.
+  //
+  // Still left undefined when every row is blank, so an untouched form is not a
+  // draft: an array is truthy whatever it holds, and saving one would bring back
+  // the bug where returning to the page wiped the preselected default vehicle.
+  const locations = tripRoute.allRows().map(l => l.label);
   const draft = {
-    start:   el('start').value,
-    end:     el('end').value,
     notes:   el('tripNotes').value,
     endTime: el('tripEndTime').value,
-    // Left undefined when there are none: an empty array is truthy, so it would
-    // make every untouched form count as a draft and bring back the bug where
-    // returning to the page wiped the preselected default vehicle.
-    stops:   tripStops.values().length ? tripStops.values().map(st => st.label) : undefined,
+    locations: locations.some(Boolean) ? locations : undefined,
   };
   // A draft records what the user chose or typed — not what the page filled in
   // for them. A vehicle or business that is only there because it's the
@@ -934,12 +892,6 @@ function restoreTripDraft() {
   let draft;
   try { draft = JSON.parse(raw); } catch { return; }
 
-  // Drafts store only the text, never a place ID, so a restored location has
-  // to route by address. This runs after an await, so a fast user may already
-  // have picked a suggestion by now — clear it rather than pairing their fresh
-  // place ID with the draft's text.
-  if (draft.start) setLocationText(document.getElementById('start'), draft.start);
-  if (draft.end)   setLocationText(document.getElementById('end'),   draft.end);
   // Tested for presence rather than truthiness so an empty value restores too:
   // that means the user had deliberately cleared the vehicle before leaving,
   // and a draft is a record of what they actually had on screen, so it wins
@@ -958,8 +910,14 @@ function restoreTripDraft() {
     sel._userSet = true;
   }
   if ('notes' in draft) document.getElementById('tripNotes').value = draft.notes;
-  // Text only, like start and end: drafts never carry place IDs.
-  if (Array.isArray(draft.stops)) { tripStops.clear(); draft.stops.forEach(l => tripStops.add(l)); }
+  // Text only, never a place ID, so a restored location routes by address. This
+  // runs after an await, so a fast user may already have picked a suggestion —
+  // setAll replaces the rows outright rather than pairing their fresh place ID
+  // with the draft's text.
+  if (Array.isArray(draft.locations)) {
+    tripRoute.setAll(draft.locations.map(label => ({ label })));
+    refreshPlaceWarnings();
+  }
   if (draft.tripDate) {
     const dateEl = document.getElementById('tripDate');
     dateEl.value = draft.tripDate;
@@ -1036,7 +994,9 @@ function looksLikeStreetAddress(text) {
 // Place ID of the suggestion the user picked for each field, keyed by input id.
 // Null whenever the text was typed or dictated rather than chosen, in which
 // case the server routes by address string instead.
-const selectedPlaceIds = { start: null, end: null };
+// Keyed by input id. Every location row is created at runtime, so there are no
+// fixed entries; a row's id is deleted along with its row.
+const selectedPlaceIds = {};
 
 // Setting .value in code does not fire an input event, so the listener that
 // normally clears a field's place ID never runs. Any programmatic write must
@@ -1047,6 +1007,15 @@ const selectedPlaceIds = { start: null, end: null };
 function setLocationText(input, text) {
   input.value = text;
   selectedPlaceIds[input.id] = null;
+  // The voice confirm bar and the valid tick both vouch for the text that was
+  // there, and both are otherwise dismissed only by a real input event — which
+  // setting .value does not fire. Left alone, a cleared field keeps a bar
+  // offering the old address, and accepting it marks an empty input valid.
+  input.classList.remove('is-valid');
+  const wrapper = input.closest('.autocomplete-wrapper');
+  wrapper?.querySelector('.confirm-bar')?.classList.remove('show');
+  const dd = wrapper?.querySelector('.autocomplete-dropdown');
+  if (dd) hideDropdown(dd);
 }
 
 function setupAutocomplete(inputId, dropdownId) {
@@ -1233,21 +1202,21 @@ function placeWarningText(names) {
          `than the one you meant.`;
 }
 
-// Reads the live fields rather than a snapshot: stops are added and removed
-// while the form is open, so the row list is whatever is on screen now.
-function tripLocationFields() {
-  const fields = ['start', 'end'].map(id => ({
-    name: id, value: document.getElementById(id).value.trim(), placeId: selectedPlaceIds[id],
+// Reads the live rows rather than a snapshot: locations are added, removed and
+// reordered while the form is open, and each is named by the position it holds
+// now — so moving a row changes which one the warning calls the start.
+function routeFields(editor) {
+  const rows = editor.allRows();
+  return rows.map((l, i) => ({
+    name: i === 0 ? 'start' : i === rows.length - 1 ? 'end' : `stop ${i}`,
+    value: l.label,
+    placeId: l.place_id,
   }));
-  tripStops.values().forEach((st, i) => fields.splice(1 + i, 0, {
-    name: `stop ${i + 1}`, value: st.label, placeId: st.place_id,
-  }));
-  return fields;
 }
 
 function updatePlaceWarning() {
   updateSpeedWarning('tripPlaceWarning', 'tripPlaceWarningText',
-                     placeWarningText(namedLocations(tripLocationFields())));
+                     placeWarningText(namedLocations(routeFields(tripRoute))));
 }
 
 // setupAutocomplete drives the fields of both forms, so it cannot know which
@@ -1258,20 +1227,13 @@ function refreshPlaceWarnings() {
   updateEditPlaceWarning();
 }
 
-// The edit modal keeps each stored place ID until its text is edited, which is
-// what placeIdsForEdit encodes — so ask it rather than reading selectedPlaceIds,
-// or a location reopened unchanged would look like it was typed by hand.
+// The modal's rows carry their own place IDs, cleared the moment a row's text is
+// edited, so one rule now covers both forms — no equivalent of placeIdsForEdit's
+// text comparison is needed to tell a reopened location from a retyped one.
 function updateEditPlaceWarning() {
   if (!editingTrip) return;
-  const start = document.getElementById('editStart').value.trim();
-  const end   = document.getElementById('editEnd').value.trim();
-  const ids   = placeIdsForEdit(start, end);
-  const fields = [{ name: 'start', value: start, placeId: ids.start_place_id }];
-  editStops.values().forEach((st, i) =>
-    fields.push({ name: `stop ${i + 1}`, value: st.label, placeId: st.place_id }));
-  fields.push({ name: 'end', value: end, placeId: ids.end_place_id });
   updateSpeedWarning('editPlaceWarning', 'editPlaceWarningText',
-                     placeWarningText(namedLocations(fields)));
+                     placeWarningText(namedLocations(routeFields(editRoute))));
 }
 
 // Both Places calls send the same body, so the bias is applied in one place
@@ -1352,8 +1314,6 @@ function hideDropdown(dropdown) {
   dropdown.style.maxHeight = '';
 }
 
-setupAutocomplete('start', 'startDropdown');
-setupAutocomplete('end', 'endDropdown');
 
 
 // ─── Intermediate stops ───────────────────────────────────────────────────
@@ -1368,97 +1328,236 @@ function parseStops(raw) {
   catch { return []; }
 }
 
-// Identity of a stop list for "has this changed since the distance was
-// calculated": the labels in order. Order is part of it — reordering the same
-// stops changes the mileage.
-function stopsKey(stops) { return JSON.stringify(stops.map(s => s.label)); }
+// Identity of a route for "has this changed since the distance was calculated":
+// the labels in order. Order is part of it — the same locations in a different
+// order are a different drive, and a different mileage.
+// Always built from allRows(), on both sides of the comparison: a key made from
+// the non-blank rows could never match one made from all of them, and every save
+// would recalculate.
+function routeKey(locations) { return JSON.stringify(locations.map(l => l.label)); }
 
-// One ordered list of stop inputs with add / remove / move up / move down.
-// Each input gets the same autocomplete and place-ID tracking as start and
-// end, so a picked stop routes by ID and a typed one routes by its text.
-// Moving a row keeps its input, so its place ID travels with it.
-function stopsEditor(listId, addBtnId, variant) {
+// A trip is one ordered list of locations, and nothing about a row says whether
+// it is the start, the end or somewhere in between — that is purely its
+// position. So there is a single kind of row, with the same autocomplete, voice
+// input and place-ID tracking on all of them, and moving one carries its input
+// (and therefore its place ID) with it. The server still stores a start, an end
+// and the intermediates; routePayload() derives those three from the order.
+//
+// MIN_LOCATIONS is 2 because a route needs somewhere to leave from and somewhere
+// to arrive at. The list never shrinks below that: the remove button on the last
+// two rows clears the text instead of deleting the row, so the form always has
+// the shape of a trip.
+const MIN_LOCATIONS = 2;
+const MAX_LOCATIONS = MAX_STOPS + 2;
+
+function routeEditor(listId, addBtnId, variant, hintId) {
   const list = document.getElementById(listId);
   const addBtn = document.getElementById(addBtnId);
   const rows = () => [...list.querySelectorAll('.stop-row')];
 
+  // Called after anything that changes the order or the number of rows, because
+  // every row's badge, placeholder and available actions depend on where it sits.
   function refresh() {
     const rs = rows();
     rs.forEach((r, i) => {
-      r.querySelector('input').placeholder = `Stop ${i + 1}`;
+      const last = i === rs.length - 1;
+      const role = i === 0 ? 'start' : last ? 'end' : `stop ${i}`;
+      const badge = r.querySelector('.loc-badge');
+      badge.textContent = role;
+      badge.classList.toggle('is-start', i === 0);
+      badge.classList.toggle('is-end', last && rs.length > 1);
+      r.querySelector('input').placeholder =
+        i === 0 ? 'Where did you start?' : last ? 'Where did you end up?' : `Stop ${i}`;
+      const icon = r.querySelector('.loc-icon i');
+      if (icon) {
+        icon.className = last && rs.length > 1 ? 'fas fa-map-marker-alt' : 'fas fa-circle';
+        icon.style.color = i === 0 ? '#10B981' : last ? '#EF4444' : '#F59E0B';
+        icon.style.fontSize = last && rs.length > 1 ? '.75rem' : '.45rem';
+      }
       r.querySelector('[data-act="up"]').disabled = i === 0;
-      r.querySelector('[data-act="down"]').disabled = i === rs.length - 1;
+      r.querySelector('[data-act="down"]').disabled = last;
+      const del = r.querySelector('[data-act="remove"]');
+      del.title = rs.length > MIN_LOCATIONS ? 'Remove this location' : 'Clear this location';
     });
-    addBtn.disabled = rs.length >= MAX_STOPS;
-    addBtn.title = rs.length >= MAX_STOPS ? `A trip can have up to ${MAX_STOPS} stops` : '';
+    addBtn.disabled = rs.length >= MAX_LOCATIONS;
+    addBtn.title = rs.length >= MAX_LOCATIONS
+      ? `A trip can have up to ${MAX_LOCATIONS} locations` : '';
+    if (hintId) updateRouteHint(hintId, rs.length);
   }
 
+  // Deleting a row below the minimum would leave a list that cannot describe a
+  // trip, so the button empties the row instead. The user sees the same button
+  // either way; its tooltip says which it will do.
   function remove(row) {
-    delete selectedPlaceIds[row.querySelector('input').id];
-    row.remove();
+    if (rows().length > MIN_LOCATIONS) {
+      delete selectedPlaceIds[row.querySelector('input').id];
+      row.remove();
+    } else {
+      setLocationText(row.querySelector('input'), '');
+    }
     refresh();
     refreshPlaceWarnings();
   }
 
   function add(label = '', placeId = null) {
-    if (rows().length >= MAX_STOPS) return null;
+    if (rows().length >= MAX_LOCATIONS) return null;
     const id = `${listId}-${++stopSeq}`;
     const row = document.createElement('div');
     row.className = 'stop-row';
-    row.innerHTML = (variant === 'trip'
+    // The trip form has room for the icon and mic; the modal is narrower and
+    // carries the plain input, as its fields did before.
+    row.innerHTML =
+      `<div class="loc-badge"></div>` +
+      (variant === 'trip'
       ? `<div class="autocomplete-wrapper stop-field">
            <div class="input-row">
              <span class="loc-icon"><i class="fas fa-circle" style="color:#F59E0B;font-size:.45rem"></i></span>
              <input type="text" id="${id}" class="loc-input" autocomplete="off">
+             <button class="mic-btn" type="button" id="${id}-mic" title="Voice input">
+               <i class="fas fa-microphone"></i>
+             </button>
            </div>
            <div class="autocomplete-dropdown d-none" id="${id}-dd"></div>
+           <div class="confirm-bar" id="${id}-cb">
+             <i class="fas fa-map-marker-alt" style="color:#F59E0B;flex-shrink:0;font-size:.8rem"></i>
+             <span class="confirm-text" id="${id}-ct"></span>
+             <button class="confirm-yes" id="${id}-cy">&#10003; Correct</button>
+             <button class="confirm-edit" id="${id}-ce">&#9998; Edit</button>
+           </div>
          </div>`
       : `<div class="autocomplete-wrapper stop-field">
            <input type="text" id="${id}" autocomplete="off">
            <div class="autocomplete-dropdown d-none" id="${id}-dd"></div>
          </div>`) +
       `<div class="stop-actions">
-         <button type="button" class="stop-btn" data-act="up" title="Move stop earlier"><i class="fas fa-arrow-up"></i></button>
-         <button type="button" class="stop-btn" data-act="down" title="Move stop later"><i class="fas fa-arrow-down"></i></button>
-         <button type="button" class="stop-btn stop-del" data-act="remove" title="Remove stop"><i class="fas fa-times"></i></button>
+         <button type="button" class="stop-btn" data-act="up" title="Move earlier"><i class="fas fa-arrow-up"></i></button>
+         <button type="button" class="stop-btn" data-act="down" title="Move later"><i class="fas fa-arrow-down"></i></button>
+         <button type="button" class="stop-btn stop-del" data-act="remove"><i class="fas fa-times"></i></button>
        </div>`;
     list.appendChild(row);
 
     const input = row.querySelector('input');
     setupAutocomplete(id, `${id}-dd`);
+    if (variant === 'trip') {
+      setupVoice(`${id}-mic`, id, `${id}-cb`, `${id}-ct`, `${id}-cy`, `${id}-ce`, `${id}-dd`);
+    }
     setLocationText(input, label);
-    // After setLocationText, which clears it: a stop restored from a saved trip
-    // keeps its place ID until its text is edited, exactly like start and end.
+    // After setLocationText, which clears it: a location restored from a saved
+    // trip or a draft keeps its place ID until its text is edited.
     selectedPlaceIds[id] = placeId || null;
 
     refreshPlaceWarnings();
     row.querySelector('.stop-actions').addEventListener('click', (e) => {
       const act = e.target.closest('[data-act]')?.dataset.act;
-      if (act === 'remove') remove(row);
-      else if (act === 'up' && row.previousElementSibling) list.insertBefore(row, row.previousElementSibling);
+      if (!act) return;
+      // remove() refreshes and re-warns for itself, either branch it takes.
+      if (act === 'remove') { remove(row); return; }
+      if (act === 'up' && row.previousElementSibling) list.insertBefore(row, row.previousElementSibling);
       else if (act === 'down' && row.nextElementSibling) list.insertBefore(row.nextElementSibling, row);
       refresh();
+      // Moving a row changes which location is the start or the end, and the
+      // warning names them by the role each one now holds.
+      refreshPlaceWarnings();
     });
     refresh();
     return input;
   }
 
-  function clear() { rows().forEach(remove); }
+  // Empties the list back to the minimum shape rather than to nothing, so the
+  // form is immediately usable again after a trip is logged.
+  function reset() {
+    rows().forEach(r => { delete selectedPlaceIds[r.querySelector('input').id]; r.remove(); });
+    for (let i = 0; i < MIN_LOCATIONS; i++) add();
+    refresh();
+  }
 
-  // Stops in visit order, blanks dropped, each with the place ID picked for it.
+  // Replaces the whole list with the given locations, keeping their order. An
+  // empty list needs no placeholder entries: the pad below brings any short
+  // list, including none at all, up to the minimum shape.
+  function setAll(locations) {
+    rows().forEach(r => { delete selectedPlaceIds[r.querySelector('input').id]; r.remove(); });
+    locations.forEach(l => add(l.label || '', l.place_id || null));
+    while (rows().length < MIN_LOCATIONS) add();
+    refresh();
+  }
+
+  // Locations in visit order, blanks dropped, each with the place ID picked for
+  // it. Blanks are dropped rather than rejected so an empty middle row is
+  // simply not a location, the way an empty stop always was.
   function values() {
     return rows()
       .map(r => { const inp = r.querySelector('input');
                   return { label: inp.value.trim(), place_id: selectedPlaceIds[inp.id] || null }; })
-      .filter(st => st.label);
+      .filter(l => l.label);
   }
 
-  addBtn.addEventListener('click', () => add()?.focus());
-  return { add, clear, values };
+  // Every row, blank ones included, for the warning to name by position.
+  function allRows() {
+    return rows().map(r => { const inp = r.querySelector('input');
+                             return { label: inp.value.trim(), place_id: selectedPlaceIds[inp.id] || null }; });
+  }
+
+  // Appends, then lifts the new row above the last one. Plain appending would
+  // make a blank row the destination and demote the trip's actual end to a
+  // stop, which looks broken even though a single arrow click undoes it. The
+  // row is still free to move anywhere afterwards, including past the end.
+  function addStop() {
+    const input = add();
+    if (!input) return null;
+    const rs = rows();
+    // Below this the appended row is the whole second half of the minimum
+    // shape, and lifting it would make it the start instead.
+    if (rs.length > MIN_LOCATIONS) list.insertBefore(rs[rs.length - 1], rs[rs.length - 2]);
+    refresh();
+    refreshPlaceWarnings();
+    return input;
+  }
+
+  addBtn.addEventListener('click', () => addStop()?.focus());
+  return { add, addStop, reset, setAll, values, allRows, count: () => rows().length };
 }
 
-const tripStops = stopsEditor('tripStops', 'tripAddStop', 'trip');
-const editStops = stopsEditor('editStops', 'editAddStop', 'edit');
+// Tells the user what the list currently amounts to, so "start" and "end"
+// meaning first and last is stated rather than left to be inferred.
+function updateRouteHint(hintId, count) {
+  const hint = document.getElementById(hintId);
+  if (!hint) return;
+  const stops = Math.max(0, count - 2);
+  hint.textContent = stops
+    ? `first is the start, last is the end · ${stops} stop${stops === 1 ? '' : 's'} between`
+    : 'first is the start, last is the end';
+}
+
+// The server still takes a start, an end and the intermediates, so the order on
+// screen is turned into that shape here — the one place that knows the first and
+// last locations are special.
+//
+// Built from every row, not from the non-blank ones: dropping blanks first would
+// slide the rest up, so a blank first row would submit the next location as the
+// start while its badge still called it a stop. The ends are required exactly
+// where they sit; a blank row in the middle is simply not a stop.
+function routeFromLocations(rows) {
+  const first = rows[0], last = rows[rows.length - 1];
+  if (rows.length < MIN_LOCATIONS || !first.label || !last.label) return null;
+  return {
+    start: first.label,
+    start_place_id: first.place_id,
+    end: last.label,
+    end_place_id: last.place_id,
+    stops: rows.slice(1, -1).filter(l => l.label),
+  };
+}
+
+function routePayload(editor) { return routeFromLocations(editor.allRows()); }
+
+// Declared here rather than beside openEditModal: building the first rows
+// refreshes the warnings, which asks whether the modal is open, and a `let`
+// further down the file is still in its dead zone at that point.
+let editingTrip = null;
+
+const tripRoute = routeEditor('tripRoute', 'tripAddStop', 'trip', 'routeHint');
+const editRoute = routeEditor('editRoute', 'editAddStop', 'edit');
+tripRoute.reset();
 
 
 // ─── Voice input ──────────────────────────────────────────────────────────
@@ -1592,8 +1691,6 @@ function setupVoice(buttonId, inputId, confirmBarId, confirmTextId, confirmYesId
   });
 }
 
-setupVoice('voiceStart', 'start', 'startConfirmBar', 'startConfirmText', 'startConfirmYes', 'startConfirmEdit', 'startDropdown');
-setupVoice('voiceEnd',   'end',   'endConfirmBar',   'endConfirmText',   'endConfirmYes',   'endConfirmEdit',   'endDropdown');
 
 // Init time toggle state
 setTimeFormat(timeFormat);
@@ -1775,12 +1872,17 @@ document.getElementById('editVehicle').addEventListener('change', () => vehicleH
 // ─── Log trip ─────────────────────────────────────────────────────────────
 
 document.getElementById('logTripBtn').addEventListener('click', async () => {
-  const start = document.getElementById('start').value.trim();
-  const end   = document.getElementById('end').value.trim();
   hideError();
   updateSpeedWarning('tripSpeedWarning', 'tripSpeedWarningText', null);
 
-  if (!start || !end) { showError('Please enter both a start and end location.'); return; }
+  // Filled rows only, so a blank row left in the middle is simply not a stop.
+  // Fewer than two and there is no route to measure — said in terms of the
+  // list the user sees rather than of a start and end field that no longer exist.
+  const route = routePayload(tripRoute);
+  if (!route) {
+    showError('Fill in the first and last locations — where the trip started and where it ended.');
+    return;
+  }
 
   const tripDateError = validateTripDate(document.getElementById('tripDate').value);
   if (tripDateError) { showError(tripDateError); return; }
@@ -1792,13 +1894,10 @@ document.getElementById('logTripBtn').addEventListener('click', async () => {
   const vehicleVal = document.getElementById('tripVehicle').value;
   const businessVal = document.getElementById('tripBusiness').value;
   const payload = {
-    start, end,
-    start_place_id: selectedPlaceIds.start,
-    end_place_id:   selectedPlaceIds.end,
+    ...route,
     vehicle_id: vehicleVal ? parseInt(vehicleVal) : null,
     business_id: businessVal ? parseInt(businessVal) : null,
     notes:      document.getElementById('tripNotes').value,
-    stops:      tripStops.values(),
     trip_date:  document.getElementById('tripDate').value      || null,
     start_time: getTimeValue('tripStartTime'),
     end_time:   getTimeValue('tripEndTime'),
@@ -1817,12 +1916,8 @@ document.getElementById('logTripBtn').addEventListener('click', async () => {
     rememberBiasCenter(data.endpoints);
     await loadHistory();
 
-    setLocationText(document.getElementById('start'), '');
-    setLocationText(document.getElementById('end'),   '');
+    tripRoute.reset();
     refreshPlaceWarnings();
-    tripStops.clear();
-    document.getElementById('start').classList.remove('is-valid');
-    document.getElementById('end').classList.remove('is-valid');
     // Clear first, then re-apply: logging one trip and immediately logging
     // another should start from the default again, not from a blank select.
     document.getElementById('tripVehicle').value   = '';
@@ -2048,35 +2143,30 @@ document.getElementById('errorClose').addEventListener('click', hideError);
 
 // ─── Edit modal ───────────────────────────────────────────────────────────
 
-let editingTrip = null;
-
 function openEditModal(id) {
   const row = document.getElementById(`trip-${id}`);
   const storedStops = parseStops(row.dataset.stops);
+  // The trip as one ordered list, which is how the modal now shows it.
+  const storedRoute = [
+    { label: row.dataset.start, place_id: row.dataset.startPlaceId || null },
+    ...storedStops,
+    { label: row.dataset.end,   place_id: row.dataset.endPlaceId   || null },
+  ];
   editingTrip = {
     id,
     miles: parseMiles(row.dataset.miles),
     durationSeconds: row.dataset.durationSeconds ? parseInt(row.dataset.durationSeconds, 10) : null,
-    calcStart: row.dataset.start,
-    calcEnd:   row.dataset.end,
-    // The place IDs these locations were originally resolved to, kept only
-    // while the corresponding text is untouched (see placeIdsForEdit).
-    origStart:   row.dataset.start,
-    origEnd:     row.dataset.end,
-    startPlaceId: row.dataset.startPlaceId || null,
-    endPlaceId:   row.dataset.endPlaceId   || null,
-    // The stops the stored distance and duration were calculated through.
-    calcStopsKey:  stopsKey(storedStops),
+    // What the stored distance and duration were calculated for: the whole
+    // route in order, so reordering counts as a change the same way editing a
+    // location does.
+    calcRouteKey:  routeKey(storedRoute),
     calcStopCount: storedStops.length,
   };
-  // placeIdsForEdit reads the trip's stored IDs rather than selectedPlaceIds,
-  // so these are already safe — but go through the helper anyway to keep one
-  // rule for every programmatic write, including a stale entry left by a
-  // previous time this modal was open.
-  setLocationText(document.getElementById('editStart'), row.dataset.start);
-  setLocationText(document.getElementById('editEnd'),   row.dataset.end);
-  editStops.clear();
-  storedStops.forEach(st => editStops.add(st.label, st.place_id));
+  // The stored place IDs are loaded onto the rows themselves, where each one
+  // survives exactly as long as its own text is untouched — a row's input
+  // listener clears it. That is what placeIdsForEdit used to work out by
+  // comparing text against the original.
+  editRoute.setAll(storedRoute);
   document.getElementById('editMiles').textContent = editingTrip.miles != null ? editingTrip.miles : 'Pending';
 
   document.getElementById('editBusiness').value = row.dataset.businessId || '';
@@ -2102,7 +2192,6 @@ function openEditModal(id) {
 function closeEditModal() {
   document.getElementById('editModal').classList.remove('open');
   editingTrip = null;
-  editStops.clear();
   updateSpeedWarning('editSpeedWarning', 'editSpeedWarningText', null);
   updateSpeedWarning('editPlaceWarning', 'editPlaceWarningText', null);
 }
@@ -2111,42 +2200,30 @@ document.getElementById('editModal').addEventListener('click', (e) => {
   if (e.target === document.getElementById('editModal')) closeEditModal();
 });
 
-// A stored place ID only describes the location it was resolved from, so it
-// survives an edit exactly as long as that field's text is unchanged; a changed
-// location falls back to address routing, which Routes geocodes itself.
-//
-// The edit inputs do have autocomplete, so picking a fresh suggestion there
-// records a place ID in selectedPlaceIds that this deliberately ignores —
-// carrying it through would mean tracking which field it belongs to across
-// modal opens. The cost is only that an edited location routes by address
-// rather than by ID, which is what every free-typed location already does.
-function placeIdsForEdit(start, end) {
-  return {
-    start_place_id: start === editingTrip.origStart ? editingTrip.startPlaceId : null,
-    end_place_id:   end   === editingTrip.origEnd   ? editingTrip.endPlaceId   : null,
-  };
-}
 
-// Calls /calculate for the given start/end and, on success, updates
-// editingTrip's miles/duration (and the locations they're now current
-// for) in place. Returns whether it succeeded; never throws.
-async function fetchEditDistance(start, end) {
-  const stops = editStops.values();
+// Calls /calculate for the modal's current route and, on success, updates
+// editingTrip's miles/duration (and the route they're now current for) in
+// place. Returns whether it succeeded; never throws.
+async function fetchEditDistance() {
+  // Snapshot before the await: keying off the live list afterwards would record
+  // a route the user changed while the request was in flight, so saveEdit would
+  // see nothing stale and store this distance against the wrong locations.
+  const sent = editRoute.allRows();
+  const route = routeFromLocations(sent);
+  if (!route) return false;
   try {
     const resp = await fetch('/calculate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ start, end, ...placeIdsForEdit(start, end), stops })
+      body: JSON.stringify(route)
     });
     const data = await resp.json();
     if (resp.ok) {
       rememberBiasCenter(data.endpoints);
       editingTrip.miles = data.distance_miles;
       editingTrip.durationSeconds = data.duration_seconds;
-      editingTrip.calcStart = start;
-      editingTrip.calcEnd   = end;
-      editingTrip.calcStopsKey  = stopsKey(stops);
-      editingTrip.calcStopCount = stops.length;
+      editingTrip.calcRouteKey   = routeKey(sent);
+      editingTrip.calcStopCount  = route.stops.length;
       document.getElementById('editMiles').textContent = data.distance_miles;
       checkEditSpeedLive();
       return true;
@@ -2156,14 +2233,12 @@ async function fetchEditDistance(start, end) {
 }
 
 async function recalcEditDistance() {
-  const start = document.getElementById('editStart').value.trim();
-  const end   = document.getElementById('editEnd').value.trim();
-  if (!start || !end) return;
+  if (!routePayload(editRoute)) return;
   const btn = document.getElementById('recalcBtn');
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Calculating…';
   try {
-    await fetchEditDistance(start, end);
+    await fetchEditDistance();
   } finally {
     btn.disabled = false;
     btn.innerHTML = '<i class="fas fa-route"></i> Recalculate';
@@ -2172,24 +2247,25 @@ async function recalcEditDistance() {
 
 async function saveEdit() {
   if (!editingTrip) return;
-  const start = document.getElementById('editStart').value.trim();
-  const end   = document.getElementById('editEnd').value.trim();
-  if (!start || !end) return;
+  const route = routePayload(editRoute);
+  if (!route) {
+    alert('Fill in the first and last locations — where the trip started and where it ended.');
+    return;
+  }
 
   const tripDateError = validateTripDate(document.getElementById('editTripDate').value);
   if (tripDateError) { alert(tripDateError); return; }
 
   const btn = document.getElementById('saveEditBtn');
 
-  // The distance in editingTrip is only valid for the locations it was last
-  // calculated for. If the user edited start, end or any stop — including just
-  // reordering the stops — without hitting Recalculate, it's now stale, so
-  // recalculate here rather than save the old trip's mileage.
-  if (start !== editingTrip.calcStart || end !== editingTrip.calcEnd ||
-      stopsKey(editStops.values()) !== editingTrip.calcStopsKey) {
+  // The distance in editingTrip is only valid for the route it was last
+  // calculated for. Editing any location, adding or removing one, or just
+  // moving one, all change the route — so one key over the whole ordered list
+  // covers every case, and a stale distance is recalculated rather than saved.
+  if (routeKey(editRoute.allRows()) !== editingTrip.calcRouteKey) {
     btn.disabled = true;
     btn.textContent = 'Recalculating…';
-    const ok = await fetchEditDistance(start, end);
+    const ok = await fetchEditDistance();
     if (!ok) {
       alert('Could not recalculate distance for the new location(s). Please check the address and try again.');
       btn.disabled = false;
@@ -2201,9 +2277,8 @@ async function saveEdit() {
   const vehicleVal = document.getElementById('editVehicle').value;
   const businessVal = document.getElementById('editBusiness').value;
   const payload = {
-    start, end, distance_miles: editingTrip.miles,
-    ...placeIdsForEdit(start, end),
-    stops: editStops.values(),
+    ...route,
+    distance_miles: editingTrip.miles,
     duration_seconds: editingTrip.durationSeconds,
     vehicle_id: vehicleVal ? parseInt(vehicleVal) : null,
     business_id: businessVal ? parseInt(businessVal) : null,
@@ -2235,8 +2310,6 @@ async function saveEdit() {
   finally { btn.disabled = false; btn.textContent = 'Save Changes'; }
 }
 
-setupAutocomplete('editStart', 'editStartDropdown');
-setupAutocomplete('editEnd',   'editEndDropdown');
 
 // Stamp date and start time before the draft is restored, so a draft's own
 // values still take precedence — same ordering as the default vehicle, which
