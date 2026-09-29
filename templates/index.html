@@ -487,6 +487,7 @@
           <input type="time" id="tripEndTime" class="form-input">
         </div>
       </div>
+      <div class="vehicle-hint" id="endTimeHint"></div>
       <div style="margin-top:12px">
         <label class="field-label" for="tripNotes">Notes</label>
         <textarea id="tripNotes" class="form-input trip-notes" maxlength="500"
@@ -758,13 +759,17 @@ function refreshTripDateTimeDefaults() {
   // could push the start past the end, which elapsedSeconds() would read as
   // an overnight trip and warn about. Leave the form alone from then on.
   const endEl = document.getElementById('tripEndTime');
-  if (endEl && endEl._userSet && endEl.value) return;
+  if (endEl && endEl._userSet && endEl.value && !endEl._derived) return;
 
   const dateEl = document.getElementById('tripDate');
   if (dateEl && dateEl._defaulted) dateEl.value = localToday();
 
   const timeEl = document.getElementById('tripStartTime');
   if (timeEl && timeEl._defaulted) timeEl.value = localNowTime();
+
+  // Setting .value fires no input event, so nothing else would move the
+  // estimated end time along with the start it is measured from.
+  applyEndTimeEstimate();
 }
 
 // pageshow covers a restore from the back/forward cache, where no script
@@ -856,9 +861,12 @@ function saveTripDraft() {
   const locations = tripRoute.allRows().map(l => l.label);
   const draft = {
     notes:   el('tripNotes').value,
-    endTime: el('tripEndTime').value,
     locations: locations.some(Boolean) ? locations : undefined,
   };
+  // An estimated end time is left out for the same reason as the stamped start
+  // time: it is the page's value, not the user's, and restoring it would freeze
+  // an estimate made for a route or a start time that may since have changed.
+  if (!el('tripEndTime')._derived) draft.endTime = el('tripEndTime').value;
   // A draft records what the user chose or typed — not what the page filled in
   // for them. A vehicle or business that is only there because it's the
   // default is left out, so coming back applies whatever the default is *then*
@@ -1225,6 +1233,12 @@ function updatePlaceWarning() {
 function refreshPlaceWarnings() {
   updatePlaceWarning();
   updateEditPlaceWarning();
+  // Every edit, add, removal and move of a location reaches this one function,
+  // which makes it the reliable place to re-estimate the end time. It is called
+  // for the modal's rows too, where the trip form's route has not changed — the
+  // key check in refreshRouteEstimate() makes that a no-op rather than a
+  // request, which is cheaper than threading the variant through every caller.
+  scheduleRouteEstimate();
 }
 
 // The modal's rows carry their own place IDs, cleared the moment a row's text is
@@ -1550,10 +1564,20 @@ function routeFromLocations(rows) {
 
 function routePayload(editor) { return routeFromLocations(editor.allRows()); }
 
-// Declared here rather than beside openEditModal: building the first rows
-// refreshes the warnings, which asks whether the modal is open, and a `let`
-// further down the file is still in its dead zone at that point.
+// Declared here rather than beside their use: building the first rows refreshes
+// the warnings, which asks whether the modal is open and schedules an end-time
+// estimate, and a `let` further down the file is still in its dead zone then.
 let editingTrip = null;
+const END_TIME_DEBOUNCE_MS = 700;
+let routeCalcTimer = null;
+// The last route we asked the server about, so an edit that leaves the route
+// unchanged — retyping the same text, moving a row back — costs no request.
+let routeCalc = { key: null, miles: null, durationSeconds: null };
+// The exact string the estimate last wrote into the end time field. Whether the
+// field still holds the estimate is decided by comparing against this rather
+// than by which event arrived: one user edit fires input and then change, so a
+// flag cleared on the first and set on the second (or the reverse) flips back.
+let estimatedEndValue = null;
 
 const tripRoute = routeEditor('tripRoute', 'tripAddStop', 'trip', 'routeHint');
 const editRoute = routeEditor('editRoute', 'editAddStop', 'edit');
@@ -1705,6 +1729,7 @@ function initTimeInput(id) {
   el.value = '';
   el._userSet = false;
   el._defaulted = false;
+  el._derived = false;
   if (el._timeInputWired) return;
   el._timeInputWired = true;
   el.addEventListener('change', function() { this._userSet = true; this._defaulted = false; });
@@ -1856,6 +1881,118 @@ document.getElementById('editStartTime').addEventListener('change', checkEditSpe
 document.getElementById('editEndTime').addEventListener('change', checkEditSpeedLive);
 
 
+// ─── Estimated end time ───────────────────────────────────────────────────
+// The end time is start time plus however long the route takes to drive, so a
+// trip logged as it is taken needs no arithmetic from the user. It re-derives
+// whenever the start time or any location changes, and stops the moment the
+// user types an end time of their own — from then on the field is theirs.
+//
+// Driving time only, with nothing added for stops: how long someone spends at a
+// stop is unknown, and padding the estimate with a guess would put a wrong
+// duration on the trip. An untouched estimate therefore sits exactly at the
+// route's own duration, which is comfortably inside the feasibility bounds.
+function addSeconds(hhmm, seconds) {
+  const [h, m] = hhmm.split(':').map(Number);
+  if (Number.isNaN(h) || Number.isNaN(m)) return null;
+  const total = (((h * 60 + m + Math.round(seconds / 60)) % 1440) + 1440) % 1440;
+  return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+}
+
+function formatDuration(seconds) {
+  const mins = Math.max(1, Math.round(seconds / 60));
+  return mins < 60 ? `${mins} min`
+    : `${Math.floor(mins / 60)} h ${String(mins % 60).padStart(2, '0')} min`;
+}
+
+// Writes the estimate into the end time field unless the user has entered one.
+// Setting .value fires no input event, so the flags are maintained by hand:
+// _userSet so getTimeValue() submits it, _derived so a later change can replace
+// it and so it is not mistaken for a time the user chose.
+function applyEndTimeEstimate() {
+  const endEl = document.getElementById('tripEndTime');
+  const startEl = document.getElementById('tripStartTime');
+  const hint = document.getElementById('endTimeHint');
+  if (!endEl || !startEl) return;
+  if (endEl.value && !endEl._derived) { hint.textContent = ''; return; }
+
+  const secs = routeCalc.durationSeconds;
+  if (secs == null || !startEl.value) {
+    if (endEl._derived) {
+      endEl.value = ''; estimatedEndValue = null;
+      endEl._userSet = false; endEl._derived = false;
+    }
+    hint.textContent = '';
+    return;
+  }
+  const end = addSeconds(startEl.value, secs);
+  if (!end) return;
+  endEl.value = end;
+  estimatedEndValue = end;
+  endEl._userSet = true;
+  endEl._derived = true;
+  hint.textContent = `Estimated from ${formatDuration(secs)} of driving — edit it if the trip ran differently.`;
+}
+
+// Asks the server for the route's distance and duration, at most once per
+// distinct route. The answer is kept so logging the trip can send it along and
+// the server skips recalculating, which keeps this feature free of extra
+// Routes requests rather than adding one per trip.
+async function refreshRouteEstimate() {
+  const rows = tripRoute.allRows();
+  const route = routeFromLocations(rows);
+  const key = route ? routeKey(rows) : null;
+  if (!key) {
+    routeCalc = { key: null, miles: null, durationSeconds: null };
+    applyEndTimeEstimate();
+    return;
+  }
+  if (key === routeCalc.key) { applyEndTimeEstimate(); return; }
+  try {
+    const resp = await fetch('/calculate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(route),
+    });
+    const data = await resp.json();
+    if (!resp.ok) return;
+    // Another edit may have landed while this was in flight; that edit started
+    // its own request, and this answer describes a route that is no longer on
+    // screen, so it must not become the estimate.
+    if (routeKey(tripRoute.allRows()) !== key) return;
+    rememberBiasCenter(data.endpoints);
+    routeCalc = { key, miles: data.distance_miles, durationSeconds: data.duration_seconds };
+    applyEndTimeEstimate();
+  } catch { /* leave the previous estimate alone */ }
+}
+
+// Debounced, because a location changes on every keystroke and each distinct
+// route costs a Routes request.
+function scheduleRouteEstimate() {
+  clearTimeout(routeCalcTimer);
+  routeCalcTimer = setTimeout(refreshRouteEstimate, END_TIME_DEBOUNCE_MS);
+}
+
+// A start time the user picks moves the estimate with it; no request needed,
+// since the driving time has not changed.
+['input', 'change'].forEach(ev =>
+  document.getElementById('tripStartTime').addEventListener(ev, () => {
+    document.getElementById('tripStartTime')._defaulted = false;
+    applyEndTimeEstimate();
+  }));
+
+// Once the user types an end time it is theirs, and the estimate stops writing
+// to the field. Clearing it again hands the field back.
+['input', 'change'].forEach(ev =>
+  document.getElementById('tripEndTime').addEventListener(ev, e => {
+    if (!e.target.value) { estimatedEndValue = null; e.target._derived = false; applyEndTimeEstimate(); return; }
+    // Unchanged from what the estimate wrote: this is the second event of the
+    // same keystroke, not the user replacing it.
+    if (e.target.value === estimatedEndValue) return;
+    e.target._derived = false;
+    document.getElementById('endTimeHint').textContent = '';
+  }));
+
+
 document.getElementById('tripVehicle').addEventListener('change', () => vehicleHintChange('tripVehicle', 'tripVehicleHint'));
 // A change event only comes from the user: preselecting a default sets .value
 // in code and fires nothing. So these flags mean "the user chose this", which
@@ -1893,8 +2030,16 @@ document.getElementById('logTripBtn').addEventListener('click', async () => {
 
   const vehicleVal = document.getElementById('tripVehicle').value;
   const businessVal = document.getElementById('tripBusiness').value;
+  // If the estimate already measured this exact route, send the result with the
+  // trip: /log reuses a distance it is given instead of asking Routes again, so
+  // the estimate costs no extra request rather than one per trip. Anything less
+  // than an exact match is left out and the server measures it itself.
+  const measured = routeCalc.key === routeKey(tripRoute.allRows()) && routeCalc.miles != null
+    ? { distance_miles: routeCalc.miles, duration_seconds: routeCalc.durationSeconds }
+    : {};
   const payload = {
     ...route,
+    ...measured,
     vehicle_id: vehicleVal ? parseInt(vehicleVal) : null,
     business_id: businessVal ? parseInt(businessVal) : null,
     notes:      document.getElementById('tripNotes').value,
@@ -1917,6 +2062,10 @@ document.getElementById('logTripBtn').addEventListener('click', async () => {
     await loadHistory();
 
     tripRoute.reset();
+    // The next trip is a different route, so the measurement and the estimate
+    // it fed both go with it.
+    routeCalc = { key: null, miles: null, durationSeconds: null };
+    document.getElementById('endTimeHint').textContent = '';
     refreshPlaceWarnings();
     // Clear first, then re-apply: logging one trip and immediately logging
     // another should start from the default again, not from a blank select.
