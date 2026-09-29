@@ -386,6 +386,39 @@
       min-height: 58px; font-family: 'Inter', sans-serif;
     }
     .notes-counter { font-size: .68rem; color: var(--muted); text-align: right; margin-top: 2px; }
+
+    /* ── Attachments ─────────────────────────── */
+    .attach-list { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+    .attach-list:empty { display: none; }
+    .attach-row {
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 9px; border: 1.5px solid var(--border); border-radius: 8px;
+      background: #F8FAFC; font-size: .78rem; min-width: 0;
+    }
+    .attach-row .attach-icon { color: var(--muted); flex-shrink: 0; font-size: .85rem; }
+    .attach-row.is-pending { border-style: dashed; color: var(--muted); }
+    .attach-name {
+      flex: 1 1 auto; min-width: 0; color: var(--text);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      text-decoration: none;
+    }
+    a.attach-name:hover { color: var(--primary); text-decoration: underline; }
+    .attach-size { flex-shrink: 0; color: var(--muted); font-size: .7rem; }
+    .attach-del {
+      flex-shrink: 0; width: 24px; height: 24px; border: none; border-radius: 6px;
+      background: transparent; color: #CBD5E1; cursor: pointer;
+      display: flex; align-items: center; justify-content: center; font-size: .72rem;
+    }
+    .attach-del:hover { background: #FEF2F2; color: #EF4444; }
+    .attach-thumbs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+    .attach-thumb {
+      width: 56px; height: 56px; border-radius: 8px; object-fit: cover;
+      border: 1.5px solid var(--border); cursor: pointer; background: #F1F5F9;
+    }
+    .trip-attach-count {
+      font-size: .72rem; color: var(--muted); margin-top: 2px;
+      display: inline-flex; align-items: center; gap: 4px;
+    }
     .trip-note-text {
       font-size: .72rem; color: var(--muted); margin-top: 2px;
       white-space: pre-wrap; overflow-wrap: anywhere;
@@ -492,6 +525,20 @@
         <textarea id="tripNotes" class="form-input trip-notes" maxlength="500"
                   placeholder="Purpose, client, anything worth remembering later"></textarea>
         <div class="notes-counter" id="tripNotesCounter"></div>
+      </div>
+      <div style="margin-top:12px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+          <label class="field-label" style="margin-bottom:0">Receipts &amp; documents</label>
+          <label class="vehicle-add-link" style="cursor:pointer;margin:0">
+            + Attach
+            <input type="file" id="tripAttachInput" multiple
+                   accept="image/*,.heic,.pdf,application/pdf" style="display:none">
+          </label>
+        </div>
+        <!-- Chosen before the trip exists, so these are held here and uploaded
+             once /log returns an id. -->
+        <div class="attach-list" id="tripAttachList"></div>
+        <div class="vehicle-hint" id="tripAttachHint"></div>
       </div>
       <div class="speed-warning" id="tripSpeedWarning">
         <i class="fas fa-triangle-exclamation"></i>
@@ -609,6 +656,19 @@
       <textarea id="editNotes" class="trip-notes" maxlength="500"
                 placeholder="Purpose, client, anything worth remembering later"></textarea>
       <div class="notes-counter" id="editNotesCounter"></div>
+    </div>
+    <div class="modal-field">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+        <label style="margin-bottom:0">Receipts &amp; documents</label>
+        <label class="vehicle-add-link" style="cursor:pointer;margin:0">
+          + Attach
+          <input type="file" id="editAttachInput" multiple
+                 accept="image/*,.heic,.pdf,application/pdf" style="display:none">
+        </label>
+      </div>
+      <!-- The trip already exists here, so a chosen file uploads immediately. -->
+      <div class="attach-list" id="editAttachList"></div>
+      <div class="vehicle-hint" id="editAttachHint"></div>
     </div>
     <div class="speed-warning" id="editSpeedWarning">
       <i class="fas fa-triangle-exclamation"></i>
@@ -1328,6 +1388,12 @@ function parseStops(raw) {
   catch { return []; }
 }
 
+// Same shape of read for the attachment metadata parked on each trip row.
+function parseAttachments(raw) {
+  try { const v = JSON.parse(raw || '[]'); return Array.isArray(v) ? v : []; }
+  catch { return []; }
+}
+
 // Identity of a route for "has this changed since the distance was calculated":
 // the labels in order. Order is part of it — the same locations in a different
 // order are a different drive, and a different mileage.
@@ -1869,6 +1935,178 @@ document.getElementById('tripVehicle').addEventListener('change', () => vehicleH
 document.getElementById('editVehicle').addEventListener('change', () => vehicleHintChange('editVehicle', 'editVehicleHint'));
 
 
+// ─── Attachments ──────────────────────────────────────────────────────────
+// Receipts and documents kept with a trip. Two paths, because the trip may not
+// exist yet: files chosen on the log form are held until /log returns an id and
+// then uploaded, while the edit modal uploads immediately.
+//
+// The limits mirror the server's so the common mistakes are caught without a
+// round trip; the server enforces them regardless, since the client's word
+// about a file is never what decides.
+const MAX_ATTACHMENTS_PER_TRIP = 10;
+const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
+
+// Files picked on the log form, waiting for a trip to belong to.
+let pendingAttachments = [];
+
+function formatBytes(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function attachIcon(mimetype) {
+  if (mimetype === 'application/pdf') return 'fa-file-pdf';
+  if ((mimetype || '').startsWith('image/')) return 'fa-file-image';
+  return 'fa-paperclip';
+}
+
+// Rejects what the server would reject anyway, but immediately and by name, so
+// a 5MB photo does not travel the network to be refused. The type is not
+// checked here: the browser's idea of a file's type comes from its extension,
+// and the server decides from the bytes.
+function attachmentProblem(file, currentCount) {
+  if (currentCount >= MAX_ATTACHMENTS_PER_TRIP) {
+    return `A trip can have at most ${MAX_ATTACHMENTS_PER_TRIP} attachments.`;
+  }
+  if (!file.size) return `${file.name} is empty.`;
+  if (file.size > MAX_ATTACHMENT_BYTES) {
+    return `${file.name} is ${formatBytes(file.size)} — each file must be under ` +
+           `${MAX_ATTACHMENT_BYTES / (1024 * 1024)}MB.`;
+  }
+  return null;
+}
+
+// One row per attachment. A saved one links to the download route; a pending
+// one has nothing to link to yet, so it reads as plain text until it uploads.
+function attachmentRow(att, onRemove) {
+  const row = document.createElement('div');
+  row.className = att.id ? 'attach-row' : 'attach-row is-pending';
+  const icon = document.createElement('i');
+  icon.className = `fas ${attachIcon(att.mimetype)} attach-icon`;
+  row.appendChild(icon);
+
+  let name;
+  if (att.id) {
+    name = document.createElement('a');
+    name.href = `/attachment/${att.id}`;
+    name.target = '_blank';
+    name.rel = 'noopener';
+  } else {
+    name = document.createElement('span');
+  }
+  name.className = 'attach-name';
+  name.textContent = att.filename;
+  name.title = att.filename;
+  row.appendChild(name);
+
+  const size = document.createElement('span');
+  size.className = 'attach-size';
+  size.textContent = att.id ? formatBytes(att.byte_size) : 'uploads with the trip';
+  row.appendChild(size);
+
+  const del = document.createElement('button');
+  del.type = 'button';
+  del.className = 'attach-del';
+  del.title = 'Remove';
+  del.innerHTML = '<i class="fas fa-times"></i>';
+  del.addEventListener('click', onRemove);
+  row.appendChild(del);
+  return row;
+}
+
+function renderPendingAttachments() {
+  const list = document.getElementById('tripAttachList');
+  list.innerHTML = '';
+  pendingAttachments.forEach((file, i) => {
+    list.appendChild(attachmentRow(
+      { filename: file.name, mimetype: file.type },
+      () => { pendingAttachments.splice(i, 1); renderPendingAttachments(); }
+    ));
+  });
+}
+
+document.getElementById('tripAttachInput').addEventListener('change', (e) => {
+  const hint = document.getElementById('tripAttachHint');
+  hint.textContent = '';
+  for (const file of e.target.files) {
+    const problem = attachmentProblem(file, pendingAttachments.length);
+    if (problem) { hint.textContent = problem; break; }
+    pendingAttachments.push(file);
+  }
+  // Cleared so picking the same file again still fires a change event.
+  e.target.value = '';
+  renderPendingAttachments();
+});
+
+async function uploadAttachment(tripId, file) {
+  const body = new FormData();
+  body.append('file', file);
+  try {
+    const resp = await fetch(`/trip/${tripId}/attachments`, { method: 'POST', body });
+    const data = await resp.json().catch(() => ({}));
+    return resp.ok ? { ok: true, attachment: data.attachment }
+                   : { ok: false, error: data.error || 'Upload failed.' };
+  } catch {
+    return { ok: false, error: 'Network error during upload.' };
+  }
+}
+
+// Uploaded one at a time rather than in parallel: the per-trip cap is counted
+// server-side per request, so concurrent uploads could race past it, and a
+// phone on a slow connection copes better with one 5MB body at a time.
+async function uploadPendingAttachments(tripId) {
+  const failures = [];
+  for (const file of pendingAttachments) {
+    const result = await uploadAttachment(tripId, file);
+    if (!result.ok) failures.push(`${file.name} (${result.error})`);
+  }
+  pendingAttachments = [];
+  renderPendingAttachments();
+  return failures;
+}
+
+// ── Edit modal: the trip exists, so these act immediately ──
+function renderEditAttachments() {
+  const list = document.getElementById('editAttachList');
+  list.innerHTML = '';
+  if (!editingTrip) return;
+  (editingTrip.attachments || []).forEach(att => {
+    list.appendChild(attachmentRow(att, async () => {
+      const resp = await fetch(`/attachment/${att.id}`, { method: 'DELETE' });
+      if (!resp.ok) {
+        document.getElementById('editAttachHint').textContent = 'Could not remove that file.';
+        return;
+      }
+      editingTrip.attachments = editingTrip.attachments.filter(a => a.id !== att.id);
+      renderEditAttachments();
+      // The trip row's paperclip count is the only other record of this on
+      // screen, so it has to be re-read rather than left showing the old count.
+      loadHistory();
+    }));
+  });
+}
+
+document.getElementById('editAttachInput').addEventListener('change', async (e) => {
+  const hint = document.getElementById('editAttachHint');
+  hint.textContent = '';
+  if (!editingTrip) return;
+  const files = [...e.target.files];
+  e.target.value = '';
+  for (const file of files) {
+    const problem = attachmentProblem(file, (editingTrip.attachments || []).length);
+    if (problem) { hint.textContent = problem; break; }
+    hint.textContent = `Uploading ${file.name}…`;
+    const result = await uploadAttachment(editingTrip.id, file);
+    if (!result.ok) { hint.textContent = result.error; break; }
+    editingTrip.attachments = [...(editingTrip.attachments || []), result.attachment];
+    renderEditAttachments();
+    hint.textContent = '';
+  }
+  loadHistory();
+});
+
+
 // ─── Log trip ─────────────────────────────────────────────────────────────
 
 document.getElementById('logTripBtn').addEventListener('click', async () => {
@@ -1913,6 +2151,12 @@ document.getElementById('logTripBtn').addEventListener('click', async () => {
     const data = await resp.json();
     if (!resp.ok) { showError(data.error || 'Failed to log trip.'); return; }
 
+    // Only now does the trip have an id to attach anything to. A file that
+    // fails is reported by name rather than silently dropped — the trip itself
+    // is already saved, so this is not a reason to fail the whole action.
+    const attachFailures = pendingAttachments.length
+      ? await uploadPendingAttachments(data.trip.id) : [];
+
     rememberBiasCenter(data.endpoints);
     await loadHistory();
 
@@ -1936,7 +2180,11 @@ document.getElementById('logTripBtn').addEventListener('click', async () => {
     // time it is being logged at rather than the one just submitted.
     applyTripDateTimeDefaults();
 
-    if (data.distance_error) {
+    if (attachFailures.length) {
+      showError(`Trip logged, but ${attachFailures.length === 1 ? 'one file' : 'some files'} ` +
+                `could not be attached: ${attachFailures.join('; ')}. ` +
+                `You can attach them by editing the trip.`);
+    } else if (data.distance_error) {
       showError(`Trip logged, but distance couldn't be calculated automatically (${data.distance_error}). You can add it later by editing the trip.`);
     } else {
       const ok = document.getElementById('successAlert');
@@ -2029,6 +2277,7 @@ function prependTripRow(trip, prepend = true) {
   row.dataset.businessName = trip.business_name || '';
   row.dataset.notes        = trip.notes || '';
   row.dataset.stops        = JSON.stringify(trip.stops || []);
+  row.dataset.attachments  = JSON.stringify(trip.attachments || []);
   row.dataset.vehicleSub  = trip.vehicle_sub  || '';
   row.dataset.tripDate    = trip.trip_date    || '';
   row.dataset.startTime   = trip.start_time   || '';
@@ -2049,6 +2298,7 @@ function prependTripRow(trip, prepend = true) {
       <div class="trip-loc-main" title="${escHtml(trip.end)}">${escHtml(trip.end)}</div>
       ${(trip.stops || []).length ? `<div class="trip-stops-text" title="via ${escHtml(trip.stops.map(st => st.label).join(' → '))}">via ${escHtml(trip.stops.map(st => st.label.split(',')[0]).join(' → '))}</div>` : ''}
       <div class="trip-note-text" style="${trip.notes ? '' : 'display:none'}">${escHtml(trip.notes || '')}</div>
+      ${(trip.attachments || []).length ? `<div class="trip-attach-count" title="Open the trip to view them"><i class="fas fa-paperclip"></i>${trip.attachments.length} file${trip.attachments.length === 1 ? '' : 's'}</div>` : ''}
     </div>
     <div class="trip-mi">${milesDisplay(trip.miles)}</div>
     <div class="trip-actions">
@@ -2154,6 +2404,9 @@ function openEditModal(id) {
   ];
   editingTrip = {
     id,
+    // Metadata only — the bytes are fetched by the download route when the user
+    // actually opens one, so the trip list never carries them.
+    attachments: parseAttachments(row.dataset.attachments),
     miles: parseMiles(row.dataset.miles),
     durationSeconds: row.dataset.durationSeconds ? parseInt(row.dataset.durationSeconds, 10) : null,
     // What the stored distance and duration were calculated for: the whole
@@ -2185,6 +2438,8 @@ function openEditModal(id) {
   });
   checkEditSpeedLive();
   updateEditPlaceWarning();
+  renderEditAttachments();
+  document.getElementById('editAttachHint').textContent = '';
 
   document.getElementById('editModal').classList.add('open');
 }
@@ -2192,6 +2447,8 @@ function openEditModal(id) {
 function closeEditModal() {
   document.getElementById('editModal').classList.remove('open');
   editingTrip = null;
+  document.getElementById('editAttachList').innerHTML = '';
+  document.getElementById('editAttachHint').textContent = '';
   updateSpeedWarning('editSpeedWarning', 'editSpeedWarningText', null);
   updateSpeedWarning('editPlaceWarning', 'editPlaceWarningText', null);
 }

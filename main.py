@@ -6,7 +6,8 @@ from datetime import datetime, date
 import requests
 from dotenv import load_dotenv
 from itsdangerous import URLSafeTimedSerializer, SignatureExpired, BadSignature
-from flask import Flask, render_template, request, redirect, url_for, jsonify, flash, session
+from flask import (Flask, render_template, request, redirect, url_for, jsonify, flash,
+                   session, Response)
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import (
     LoginManager, UserMixin, login_user, logout_user,
@@ -24,10 +25,19 @@ app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-fallback-key')
 
 MAX_PHOTO_BYTES = 2 * 1024 * 1024  # 2MB
+# Receipts are photographed on phones, where 2MB is a routine single image, so
+# attachments get their own larger ceiling. Both counts are enforced per file
+# and per trip: the bytes live in Postgres, and Neon's free tier is ~0.5GB, so
+# an unbounded number of 5MB files would fill it rather than fail gracefully.
+MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024  # 5MB
+MAX_ATTACHMENTS_PER_TRIP = 10
+MAX_FILENAME_LENGTH = 120
 # Reject oversized request bodies at the Werkzeug layer before they're ever
 # buffered into memory, rather than only checking size after a full read().
 # +64KB covers multipart boundary/header overhead around the raw file bytes.
-app.config['MAX_CONTENT_LENGTH'] = MAX_PHOTO_BYTES + 64 * 1024
+# The largest upload any route accepts, since this cap is global. +64KB covers
+# multipart boundary/header overhead around the raw file bytes.
+app.config['MAX_CONTENT_LENGTH'] = max(MAX_PHOTO_BYTES, MAX_ATTACHMENT_BYTES) + 64 * 1024
 
 # Use PostgreSQL (via pg8000, pure-Python driver) when DATABASE_URL is set; SQLite locally.
 # pg8000 needs the +pg8000 dialect prefix and has no system library dependencies.
@@ -108,6 +118,24 @@ class Vehicle(db.Model):
     make    = db.Column(db.String(60))
     model   = db.Column(db.String(60))
     trips   = db.relationship('Trip', backref='vehicle', lazy=True)
+
+
+class TripAttachment(db.Model):
+    """A receipt or document kept with a trip.
+
+    The bytes live here rather than on disk because Render's filesystem is
+    ephemeral — a redeploy or an idle spin-down would take every file with it.
+    Stored as bytea rather than a base64 string like the profile photo: these
+    are served through a download route instead of being inlined into HTML, so
+    there is nothing to gain from text encoding and 33% of the size to lose.
+    """
+    id         = db.Column(db.Integer, primary_key=True)
+    trip_id    = db.Column(db.Integer, db.ForeignKey('trip.id'), nullable=False)
+    filename   = db.Column(db.String(MAX_FILENAME_LENGTH), nullable=False)
+    mimetype   = db.Column(db.String(100), nullable=False)
+    byte_size  = db.Column(db.Integer, nullable=False)
+    data       = db.Column(db.LargeBinary, nullable=False)
+    uploaded_at = db.Column(db.DateTime, server_default=db.func.now())
 
 
 class Business(db.Model):
@@ -193,6 +221,9 @@ def _trip_dict(trip, vehicle_name=None, vehicle_sub=None, business_name=None):
         'stops':        _stops_from_db(trip.stops),
         'start_place_id': trip.start_place_id,
         'end_place_id':   trip.end_place_id,
+        'attachments':  [_attachment_dict(a) for a in
+                         TripAttachment.query.filter_by(trip_id=trip.id)
+                         .order_by(TripAttachment.id).all()],
     }
 
 
@@ -1026,7 +1057,105 @@ def delete_trip(trip_id):
     trip = Trip.query.filter_by(id=trip_id, user_id=current_user.id).first()
     if not trip:
         return jsonify({'error': 'Trip not found.'}), 404
+    # No database-level cascade: the schema is built with plain ALTER TABLE and
+    # has no ON DELETE, so the attachments are removed here. Left behind they
+    # would be unreachable rows still holding their bytes.
+    TripAttachment.query.filter_by(trip_id=trip.id).delete()
     db.session.delete(trip)
+    db.session.commit()
+    return jsonify({'success': True})
+
+
+# ---------------------------------------------------------------------------
+# Trip attachments
+# ---------------------------------------------------------------------------
+
+def _owned_trip(trip_id):
+    """The trip if the current user owns it, else None. Scoping every lookup
+    through user_id is what stops one account reaching another's receipts."""
+    return Trip.query.filter_by(id=trip_id, user_id=current_user.id).first()
+
+
+def _owned_attachment(att_id):
+    """The attachment if the current user owns the trip it belongs to."""
+    return (TripAttachment.query
+            .join(Trip, TripAttachment.trip_id == Trip.id)
+            .filter(TripAttachment.id == att_id, Trip.user_id == current_user.id)
+            .first())
+
+
+def _clean_filename(name):
+    """A display-safe filename: no path, no control characters, length-capped.
+
+    The name is only ever shown and sent in a Content-Disposition header, never
+    used to open a file, but a name carrying a path or a newline could still
+    mislead the user or split the header.
+    """
+    name = (name or '').replace('\\', '/').split('/')[-1]
+    name = re.sub(r'[\x00-\x1f\x7f"]', '', name).strip()
+    if len(name) > MAX_FILENAME_LENGTH:
+        stem, dot, ext = name.rpartition('.')
+        name = (stem[:MAX_FILENAME_LENGTH - len(ext) - 1] + dot + ext) if dot else name[:MAX_FILENAME_LENGTH]
+    return name or 'attachment'
+
+
+@app.route('/trip/<int:trip_id>/attachments', methods=['POST'])
+@login_required
+def upload_attachment(trip_id):
+    trip = _owned_trip(trip_id)
+    if not trip:
+        return jsonify({'error': 'Trip not found.'}), 404
+
+    file = request.files.get('file')
+    if not file or not file.filename:
+        return jsonify({'error': 'No file provided.'}), 400
+
+    existing = TripAttachment.query.filter_by(trip_id=trip.id).count()
+    if existing >= MAX_ATTACHMENTS_PER_TRIP:
+        return jsonify({'error': f'A trip can have at most {MAX_ATTACHMENTS_PER_TRIP} attachments.'}), 400
+
+    raw = file.read()
+    if not raw:
+        return jsonify({'error': 'That file is empty.'}), 400
+    if len(raw) > MAX_ATTACHMENT_BYTES:
+        mb = MAX_ATTACHMENT_BYTES // (1024 * 1024)
+        return jsonify({'error': f'Each file must be smaller than {mb}MB.'}), 400
+
+    mimetype = sniff_attachment_type(raw)
+    if not mimetype:
+        return jsonify({'error': 'Only images (JPEG, PNG, WEBP, GIF, HEIC) and PDFs can be attached.'}), 400
+
+    att = TripAttachment(trip_id=trip.id, filename=_clean_filename(file.filename),
+                         mimetype=mimetype, byte_size=len(raw), data=raw)
+    db.session.add(att)
+    db.session.commit()
+    return jsonify({'success': True, 'attachment': _attachment_dict(att)})
+
+
+@app.route('/attachment/<int:att_id>', methods=['GET'])
+@login_required
+def download_attachment(att_id):
+    att = _owned_attachment(att_id)
+    if not att:
+        return jsonify({'error': 'Attachment not found.'}), 404
+    # inline so an image or PDF opens in the browser; the filename still rides
+    # along for a save. Sniffing is disabled because the type here was decided
+    # from the bytes, and letting the browser guess again could turn an
+    # unexpected upload into something it executes in this origin.
+    return Response(att.data, mimetype=att.mimetype, headers={
+        'Content-Disposition': f'inline; filename="{att.filename}"',
+        'X-Content-Type-Options': 'nosniff',
+        'Cache-Control': 'private, max-age=3600',
+    })
+
+
+@app.route('/attachment/<int:att_id>', methods=['DELETE'])
+@login_required
+def delete_attachment(att_id):
+    att = _owned_attachment(att_id)
+    if not att:
+        return jsonify({'error': 'Attachment not found.'}), 404
+    db.session.delete(att)
     db.session.commit()
     return jsonify({'success': True})
 
@@ -1309,9 +1438,40 @@ def sniff_image_type(raw):
     return None
 
 
+# What an attachment may be, again decided by the bytes rather than by the
+# filename or the browser's Content-Type. HEIC is accepted because it is what
+# an iPhone produces when a photo is picked from Files rather than the camera;
+# no browser renders it, so the client offers it for download instead of
+# previewing it.
+def sniff_attachment_type(raw):
+    image = sniff_image_type(raw)
+    if image:
+        return image
+    if raw.startswith(b'%PDF-'):
+        return 'application/pdf'
+    # ISO base-media container: 'ftyp' at offset 4, then the brand. HEIC and
+    # HEIF share the box structure, so the brand is what distinguishes them.
+    if raw[4:8] == b'ftyp' and raw[8:12] in (b'heic', b'heix', b'hevc', b'heim',
+                                             b'heis', b'hevm', b'mif1', b'msf1'):
+        return 'image/heic'
+    return None
+
+
+def _attachment_dict(att):
+    return {
+        'id': att.id,
+        'filename': att.filename,
+        'mimetype': att.mimetype,
+        'byte_size': att.byte_size,
+        # Only these render in an <img>; everything else is a download link.
+        'previewable': att.mimetype in ('image/jpeg', 'image/png', 'image/webp', 'image/gif'),
+    }
+
+
 @app.errorhandler(413)
 def request_too_large(_e):
-    return jsonify({'error': 'Photo must be smaller than 2MB.'}), 413
+    limit_mb = max(MAX_PHOTO_BYTES, MAX_ATTACHMENT_BYTES) // (1024 * 1024)
+    return jsonify({'error': f'That file is too large — the limit is {limit_mb}MB.'}), 413
 
 
 @app.route('/profile/photo', methods=['POST'])
