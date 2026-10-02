@@ -162,6 +162,12 @@ class Trip(db.Model):
     trip_date      = db.Column(db.String(10), nullable=True)
     start_time     = db.Column(db.String(5),  nullable=True)
     end_time       = db.Column(db.String(5),  nullable=True)
+    # The day the trip ended. Usually the trip date, the day after when the
+    # clock crossed midnight, and later still for a drive spanning more than one
+    # night — which two time fields and a single date cannot express. Null for a
+    # trip with no end time, and for rows logged before this column existed,
+    # where it is derived on read instead.
+    end_date       = db.Column(db.String(10), nullable=True)
     duration_seconds = db.Column(db.Integer, nullable=True)
     # Free-text note for the trip: purpose, client, anything worth recalling
     # when the log is reviewed months later. Capped in the route rather than by
@@ -225,8 +231,10 @@ def _trip_dict(trip, vehicle_name=None, vehicle_sub=None, business_name=None,
         # trip cannot run longer than a day in this model. Sent from here so the
         # history row, the edit modal and all three exports read one value
         # instead of each re-deriving it.
-        'ends_next_day': _ends_next_day(trip.start_time, trip.end_time),
-        'end_date':      _end_date(trip.trip_date, trip.start_time, trip.end_time),
+        # Stored when known, otherwise implied by the times, so a trip logged
+        # before the column existed still reports an end date.
+        'end_date':      _trip_end_date(trip),
+        'ends_next_day': (_trip_end_date(trip) or trip.trip_date) != trip.trip_date,
         'duration_seconds': trip.duration_seconds,
         'notes':        trip.notes,
         'stops':        _stops_from_db(trip.stops),
@@ -261,6 +269,7 @@ def _migrate_db():
                 ('trip_date',  'VARCHAR(10)'),
                 ('start_time', 'VARCHAR(5)'),
                 ('end_time',   'VARCHAR(5)'),
+                ('end_date',   'VARCHAR(10)'),
                 ('duration_seconds', 'INTEGER'),
                 ('start_place_id', 'VARCHAR(255)'),
                 ('end_place_id',   'VARCHAR(255)'),
@@ -290,6 +299,7 @@ def _migrate_db():
                 ('trip_date',  'VARCHAR(10)'),
                 ('start_time', 'VARCHAR(5)'),
                 ('end_time',   'VARCHAR(5)'),
+                ('end_date',   'VARCHAR(10)'),
                 ('duration_seconds', 'INTEGER'),
                 ('start_place_id', 'VARCHAR(255)'),
                 ('end_place_id',   'VARCHAR(255)'),
@@ -547,24 +557,41 @@ def _ends_next_day(start_time, end_time):
     return end < start
 
 
-def _end_date(trip_date, start_time, end_time):
-    """The date the trip ended on: its trip date, or the day after when the
-    clock has wrapped past midnight. None when there is no trip date to count
-    from."""
+def _derived_end_date(trip_date, start_time, end_time):
+    """The end date implied by the times alone: the trip date, or the day after
+    when the clock wrapped past midnight.
+
+    Used for trips stored before end_date existed, and as the default when the
+    client does not send one. It can only ever say "same day" or "next day",
+    which is why a trip spanning more than one night needs the column.
+    """
     parsed = _parse_iso_date(trip_date)
-    if not parsed:
+    if not parsed or not end_time:
         return None
     if _ends_next_day(start_time, end_time):
         parsed += timedelta(days=1)
     return parsed.isoformat()
 
 
-def _elapsed_seconds(start_time, end_time):
-    """Seconds between two 'HH:MM' strings, counting an end earlier than the
-    start as the next day. None if either is missing/unparseable."""
+def _trip_end_date(trip):
+    """A trip's end date: the stored one, or the one its times imply."""
+    return trip.end_date or _derived_end_date(trip.trip_date, trip.start_time, trip.end_time)
+
+
+def _elapsed_seconds(start_time, end_time, trip_date=None, end_date=None):
+    """Seconds from start to end.
+
+    With both dates the span is measured between them, so a drive of more than
+    one night counts every hour of it. Without them only the clock is available,
+    and an end earlier than the start is read as the next day — which is all a
+    single date can mean. None if either time is missing or unparseable.
+    """
     start_min, end_min = _minutes_of_day(start_time), _minutes_of_day(end_time)
     if start_min is None or end_min is None:
         return None
+    start_day, end_day = _parse_iso_date(trip_date), _parse_iso_date(end_date)
+    if start_day and end_day:
+        return ((end_day - start_day).days * 1440 + end_min - start_min) * 60
     if end_min < start_min:
         end_min += 24 * 60
     return (end_min - start_min) * 60
@@ -583,12 +610,17 @@ STOP_DWELL_ALLOWANCE_SECONDS = 2 * 60 * 60
 
 
 def check_trip_feasibility(start_time, end_time, distance_miles, duration_seconds,
-                           stop_count=0):
+                           stop_count=0, trip_date=None, end_date=None):
     """Warning string if the clock-time gap is implausible (too fast or too
-    slow) for the distance, else None. Pure function, never raises — non-blocking."""
+    slow) for the distance, else None. Pure function, never raises — non-blocking.
+
+    The dates are passed so a trip spanning more than one night is judged on the
+    hours it really took; without them a 30-hour drive reads as 6 and a genuine
+    warning goes unraised.
+    """
     if duration_seconds is None or not distance_miles:
         return None
-    elapsed = _elapsed_seconds(start_time, end_time)
+    elapsed = _elapsed_seconds(start_time, end_time, trip_date, end_date)
     if elapsed is None or elapsed <= 0:
         return None
     elapsed_min, expected_min = round(elapsed / 60), round(duration_seconds / 60)
@@ -615,6 +647,27 @@ def _parse_iso_date(value):
         return datetime.strptime(value, '%Y-%m-%d').date()
     except ValueError:
         return None
+
+
+def validate_end_date(end_date, trip_date, client_today=None):
+    """Error string if end_date is unusable, else None. Optional, like the trip
+    date: None/empty means "derive it from the times".
+
+    Judged against the client's own date for the same reason validate_trip_date
+    is — a browser and the server can disagree on the day near midnight.
+    """
+    if not end_date:
+        return None
+    parsed = _parse_iso_date(end_date)
+    if not parsed:
+        return f'"{end_date}" is not a valid date.'
+    today = _parse_iso_date(client_today) or date.today()
+    if parsed > today:
+        return 'End date cannot be in the future.'
+    start = _parse_iso_date(trip_date)
+    if start and parsed < start:
+        return 'End date cannot be before the trip date.'
+    return None
 
 
 def validate_trip_date(trip_date, client_today=None):
@@ -915,6 +968,11 @@ def log_trip():
     if date_error:
         return jsonify({'error': date_error}), 400
 
+    end_date  = (data.get('end_date') or '').strip() or None
+    date_error = validate_end_date(end_date, trip_date, client_today=data.get('client_today'))
+    if date_error:
+        return jsonify({'error': date_error}), 400
+
     start_place_id = (data.get('start_place_id') or '').strip() or None
     end_place_id   = (data.get('end_place_id')   or '').strip() or None
     try:
@@ -959,7 +1017,8 @@ def log_trip():
     warning = None
     if distance_miles is not None:
         warning = check_trip_feasibility(start_time, end_time, distance_miles, duration_seconds,
-                                         stop_count=len(stops))
+                                         stop_count=len(stops),
+                                         trip_date=trip_date, end_date=end_date)
 
     trip = Trip(
         user_id=current_user.id,
@@ -972,6 +1031,7 @@ def log_trip():
         trip_date=trip_date,
         start_time=start_time,
         end_time=end_time,
+        end_date=end_date or _derived_end_date(trip_date, start_time, end_time),
         duration_seconds=duration_seconds,
         start_place_id=start_place_id,
         end_place_id=end_place_id,
@@ -1035,6 +1095,11 @@ def update_trip(trip_id):
     if date_error:
         return jsonify({'error': date_error}), 400
 
+    end_date  = (data.get('end_date') or '').strip() or None
+    date_error = validate_end_date(end_date, trip_date, client_today=data.get('client_today'))
+    if date_error:
+        return jsonify({'error': date_error}), 400
+
     distance_miles = float(distance_miles) if distance_miles is not None else None
 
     vehicle_id  = data.get('vehicle_id') or None
@@ -1068,7 +1133,8 @@ def update_trip(trip_id):
     warning = None
     if distance_miles is not None:
         warning = check_trip_feasibility(start_time, end_time, distance_miles, duration_seconds,
-                                         stop_count=len(stops))
+                                         stop_count=len(stops),
+                                         trip_date=trip_date, end_date=end_date)
 
     # The client sends a place ID back only for a location it left untouched;
     # editing the text clears it, so the trip falls back to address routing
@@ -1084,6 +1150,7 @@ def update_trip(trip_id):
     trip.notes          = _clean_notes(data.get('notes'))
     trip.stops          = json.dumps(stops) if stops else None
     trip.trip_date      = trip_date
+    trip.end_date       = end_date or _derived_end_date(trip_date, start_time, end_time)
     trip.start_time     = start_time
     trip.end_time       = end_time
     trip.duration_seconds = duration_seconds
