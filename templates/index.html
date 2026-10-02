@@ -373,6 +373,15 @@
     /* ── Trip form extra fields ──────────────── */
     .trip-extras { margin-top: 16px; padding-top: 16px; border-top: 1.5px solid var(--border); }
     .trip-extras-row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; margin-top: 10px; }
+    /* Start date beside start time, end date beside end time. The pairing is
+       the layout, so neither row has to be labelled as a pair. */
+    .datetime-grid {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 10px 12px; margin-top: 10px;
+    }
+    /* The modal's date and time inputs carry no .form-input class of their own,
+       so they are sized here rather than stretching to their intrinsic width. */
+    .datetime-grid > * { min-width: 0; }
+    .datetime-grid input { width: 100%; box-sizing: border-box; }
     .form-input {
       width: 100%; padding: 10px 13px;
       border: 1.5px solid var(--border); border-radius: var(--radius-sm);
@@ -435,12 +444,6 @@
     .trip-actions { padding-top: 1px; }
 
     /* ── Edit modal extras ───────────────────── */
-    .modal-row-3 {
-      display: grid; grid-template-columns: 1fr 1fr 1fr;
-      gap: 10px; margin-bottom: 14px;
-    }
-    .modal-row-3 > * { min-width: 0; }
-    .modal-row-3 input { min-width: 0; width: 100%; }
     .modal-field select {
       width: 100%; padding: 11px 14px;
       border: 1.5px solid var(--border); border-radius: var(--radius-sm);
@@ -452,7 +455,7 @@
 
     @media (max-width: 480px) {
       .trip-extras-row { grid-template-columns: 1fr; }
-      .modal-row-3 { grid-template-columns: 1fr; }
+      .datetime-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -506,14 +509,18 @@
           <option value="">— No business (optional) —</option>
         </select>
       </div>
-      <div class="trip-extras-row">
+      <div class="datetime-grid">
         <div>
-          <label class="field-label" for="tripDate">Trip Date</label>
+          <label class="field-label" for="tripDate">Start Date</label>
           <input type="date" id="tripDate" class="form-input">
         </div>
         <div>
           <label class="field-label" for="tripStartTime">Start Time</label>
           <input type="time" id="tripStartTime" class="form-input">
+        </div>
+        <div>
+          <label class="field-label" for="tripEndDate">End Date</label>
+          <input type="date" id="tripEndDate" class="form-input">
         </div>
         <div>
           <label class="field-label" for="tripEndTime">End Time</label>
@@ -638,9 +645,9 @@
         <option value="">— No business (optional) —</option>
       </select>
     </div>
-    <div class="modal-row-3">
+    <div class="datetime-grid" style="margin-top:0;margin-bottom:14px">
       <div class="modal-field" style="margin-bottom:0">
-        <label>Trip Date</label>
+        <label>Start Date</label>
         <input type="date" id="editTripDate">
       </div>
       <div class="modal-field" style="margin-bottom:0">
@@ -648,10 +655,15 @@
         <input type="time" id="editStartTime">
       </div>
       <div class="modal-field" style="margin-bottom:0">
+        <label>End Date</label>
+        <input type="date" id="editEndDate">
+      </div>
+      <div class="modal-field" style="margin-bottom:0">
         <label>End Time</label>
         <input type="time" id="editEndTime">
       </div>
     </div>
+    <div class="vehicle-hint" id="editEndDateHint" style="margin-top:-8px;margin-bottom:12px"></div>
     <div class="modal-field">
       <label>Notes</label>
       <textarea id="editNotes" class="trip-notes" maxlength="500"
@@ -709,23 +721,187 @@ function formatTime(hhmm) {
   return `${h % 12 || 12}:${String(m).padStart(2,'0')} ${ampm}`;
 }
 
-function formatTimeRange(s, e) {
-  if (s && e) return `${formatTime(s)} – ${formatTime(e)}`;
-  if (s) return formatTime(s);
-  if (e) return formatTime(e);
-  return '';
+// The end date a trip's times imply on their own: its trip date, or the day
+// after when the clock wrapped. Mirrors _derived_end_date() in main.py, and like
+// it can only say same-day or next-day — a longer trip needs the field.
+// days is how many midnights the trip crossed. Passed in when it is known from
+// the drive's own length; otherwise inferred from the times, which can only ever
+// tell same-day from next-day.
+function addDays(tripDate, days) {
+  const [y, mo, dd] = (tripDate || '').split('-').map(Number);
+  if ([y, mo, dd].some(Number.isNaN)) return '';
+  const d = new Date(y, mo - 1, dd + days);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
-function formatTripDate(dateStr) {
+const MAX_TRIP_DAYS = 30;
+
+// Mirrors validate_end_date() in main.py. An end date in the future is allowed:
+// a trip that sets out at 23:30 and arrives at 01:00 is logged before it ends,
+// and the start time defaults to now, so refusing that would refuse the very
+// case the estimate exists for.
+function validateEndDate(endDate, tripDate) {
+  if (!endDate) return null;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(endDate)) return 'Please enter a valid end date.';
+  if (!tripDate) return null;
+  if (endDate < tripDate) return 'End date cannot be before the trip date.';
+  const days = Math.round((new Date(endDate) - new Date(tripDate)) / 86400000);
+  if (days > MAX_TRIP_DAYS) return `A trip cannot run longer than ${MAX_TRIP_DAYS} days.`;
+  return null;
+}
+
+function derivedEndDate(tripDate, start, end, days = null) {
+  if (!tripDate || !end) return '';
+  return addDays(tripDate, days != null ? days : (endsNextDay(start, end) ? 1 : 0));
+}
+
+// Keeps the log form's end date in step with the times. The field is revealed
+// only once the trip does not end on its own date, and follows the times until
+// the user sets it themselves — at which point it is theirs, the same rule the
+// end time follows.
+// Says how long the modal's trip spans, so a date two days after the trip date
+// reads as deliberate rather than as a typo.
+// The modal's end date followed nothing: it was prefilled from the stored trip
+// and then sent back unchanged, so editing an overnight trip to end at 22:00
+// kept the next day's date and stored a 24-hour trip. It now tracks the times
+// the same way the log form's does.
+//
+// Whether the stored date counts as the user's own is decided by comparing it
+// against what the stored times imply: a date that matches is derived and should
+// keep following, while one that differs can only have been set deliberately —
+// a multi-day trip — and must not be overwritten.
+function syncEditEndDate() {
+  const dateEl = document.getElementById('editEndDate');
+  const tripDate = document.getElementById('editTripDate').value;
+  if (!dateEl) return;
+  if (!dateEl._userSet) {
+    dateEl.value = derivedEndDate(tripDate,
+                                  document.getElementById('editStartTime').value,
+                                  document.getElementById('editEndTime').value);
+  }
+  dateEl.min = tripDate || '';
+  dateEl.removeAttribute('max');
+  syncEditEndDateHint();
+}
+
+function syncEditEndDateHint() {
+  const hint = document.getElementById('editEndDateHint');
+  if (!hint) return;
+  const tripDate = document.getElementById('editTripDate').value;
+  const endDate  = document.getElementById('editEndDate').value;
+  if (!tripDate || !endDate || endDate === tripDate) { hint.textContent = ''; return; }
+  const days = Math.round((new Date(endDate) - new Date(tripDate)) / 86400000);
+  hint.textContent = days === 1
+    ? 'Ends the next day.'
+    : days > 1 ? `Ends ${days} days later.` : 'End date is before the trip date.';
+}
+
+// A date the user types into the end field is theirs; clearing it hands it back.
+['input', 'change'].forEach(ev =>
+  document.getElementById('editEndDate').addEventListener(ev, e => {
+    e.target._userSet = !!e.target.value;
+    syncEditEndDateHint();
+  }));
+// Anything that moves the span re-derives the end date.
+['editTripDate', 'editStartTime', 'editEndTime'].forEach(id =>
+  ['input', 'change'].forEach(ev =>
+    document.getElementById(id).addEventListener(ev, syncEditEndDate)));
+
+// Keeps the end date in step with the times. The field is always on screen, so
+// this only fills it: it follows the times until the user sets it themselves, at
+// which point it is theirs — the same rule the end time follows.
+function syncTripEndDate() {
+  const dateEl = document.getElementById('tripEndDate');
+  const tripDate = document.getElementById('tripDate').value;
+  const start = document.getElementById('tripStartTime').value;
+  const end = document.getElementById('tripEndTime').value;
+  if (!dateEl) return;
+
+  // The estimate knows how many days its drive spanned; a time the user typed
+  // does not, so that falls back to what the clock alone can imply.
+  const days = document.getElementById('tripEndTime')._derived ? estimatedEndDays : null;
+  if (!dateEl._userSet) dateEl.value = derivedEndDate(tripDate, start, end, days);
+  dateEl.min = tripDate || '';
+  // No max: a trip logged as it sets out legitimately ends tomorrow.
+  dateEl.removeAttribute('max');
+}
+
+['input', 'change'].forEach(ev =>
+  document.getElementById('tripEndDate').addEventListener(ev, e => {
+    // Cleared, so it goes back to following the times.
+    e.target._userSet = !!e.target.value;
+    syncTripEndDate();
+  }));
+
+// Mirrors _ends_next_day() in main.py: an end time strictly earlier than the
+// start is the only way one trip date can say the clock crossed midnight.
+// Strictly earlier, so equal times stay a zero-length trip.
+//
+// This and derivedEndDate() and elapsedSeconds() all restate server rules,
+// because the form has to show an answer before it submits anything. The server
+// decides what is stored and never trusts these, so a drift shows up as the page
+// disagreeing with what it saved rather than as bad data — but keep the pairs in
+// step, and keep .github/scripts/check_trip_times.py as the record of what the
+// rules are:
+//   endsNextDay     ↔ _ends_next_day
+//   derivedEndDate  ↔ _derived_end_date
+//   elapsedSeconds  ↔ _elapsed_seconds
+//   validateEndDate ↔ validate_end_date
+function endsNextDay(start, end) {
+  if (!start || !end) return false;
+  const mins = v => { const [h, m] = v.split(':').map(Number);
+                      return Number.isNaN(h) || Number.isNaN(m) ? null : h * 60 + m; };
+  const s = mins(start), e = mins(end);
+  return s !== null && e !== null && e < s;
+}
+
+// How many days after the trip date the trip ended. Taken from the two dates
+// when both are known, because a trip spanning more than one night can have an
+// end time later in the clock than its start and would otherwise look same-day.
+// Falls back to the times for a trip stored before end_date existed.
+function dayOffset(startTime, endTime, tripDate, endDate) {
+  if (tripDate && endDate) {
+    return Math.round((new Date(endDate) - new Date(tripDate)) / 86400000);
+  }
+  return endsNextDay(startTime, endTime) ? 1 : 0;
+}
+
+// A trip that ends on another day names that day beside its arrival time, rather
+// than carrying a "+1 day" the reader has to apply to a date elsewhere on the
+// row. The year is repeated only when the trip crosses into a different one.
+function formatTimeRange(s, e, tripDate, endDate) {
+  if (!s && !e) return '';
+  if (!s || !e) return formatTime(s || e);
+  if (dayOffset(s, e, tripDate, endDate) <= 0) {
+    return `${formatTime(s)} – ${formatTime(e)}`;
+  }
+  const shown = endDate || derivedEndDate(tripDate, s, e);
+  if (!shown) return `${formatTime(s)} – ${formatTime(e)}`;
+  const sameYear = !!tripDate && shown.slice(0, 4) === tripDate.slice(0, 4);
+  return `${formatTime(s)} – ${formatTripDate(shown, { withYear: !sameYear })} ${formatTime(e)}`;
+}
+
+const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+// withYear is dropped where the year is already established nearby — an end date
+// shown beside its start date repeats it for no one's benefit, unless the trip
+// happens to cross New Year.
+function formatTripDate(dateStr, { withYear = true } = {}) {
   if (!dateStr) return '';
   const [y, mo, d] = dateStr.split('-').map(Number);
-  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-  return `${months[mo - 1]} ${d}, ${y}`;
+  if ([y, mo, d].some(Number.isNaN)) return '';
+  return `${MONTH_NAMES[mo - 1]} ${d}${withYear ? `, ${y}` : ''}`;
+}
+
+// A date and a time as one phrase, for places that show a single moment.
+function formatDateTime(dateStr, hhmm) {
+  return [formatTripDate(dateStr), formatTime(hhmm)].filter(Boolean).join(' ');
 }
 
 function refreshTimeDisplays() {
   document.querySelectorAll('.trip-time-display').forEach(el => {
-    el.textContent = formatTimeRange(el.dataset.rawStart, el.dataset.rawEnd) || '–';
+    el.textContent = formatTimeRange(el.dataset.rawStart, el.dataset.rawEnd,
+                                     el.dataset.tripDate, el.dataset.endDate) || '–';
   });
 }
 
@@ -1644,6 +1820,10 @@ let routeCalc = { key: null, miles: null, durationSeconds: null };
 // than by which event arrived: one user edit fires input and then change, so a
 // flag cleared on the first and set on the second (or the reverse) flips back.
 let estimatedEndValue = null;
+// How many midnights the estimated drive crossed. Null whenever the end time is
+// not the estimate's, in which case only the times are available and they can
+// say at most "next day".
+let estimatedEndDays = null;
 
 const tripRoute = routeEditor('tripRoute', 'tripAddStop', 'trip', 'routeHint');
 const editRoute = routeEditor('editRoute', 'editAddStop', 'edit');
@@ -1906,7 +2086,10 @@ function elapsedSeconds(startTime, endTime) {
   const [eh, em] = endTime.split(':').map(Number);
   if ([sh, sm, eh, em].some(Number.isNaN)) return null;
   let startMin = sh * 60 + sm, endMin = eh * 60 + em;
-  if (endMin <= startMin) endMin += 24 * 60;
+  // Strictly earlier, matching endsNextDay(): equal times are a zero-length
+  // trip, and reading them as a full day round-trip produced a nonsense
+  // "much longer than typical" warning.
+  if (endMin < startMin) endMin += 24 * 60;
   return (endMin - startMin) * 60;
 }
 
@@ -1957,11 +2140,20 @@ document.getElementById('editEndTime').addEventListener('change', checkEditSpeed
 // stop is unknown, and padding the estimate with a guess would put a wrong
 // duration on the trip. An untouched estimate therefore sits exactly at the
 // route's own duration, which is comfortably inside the feasibility bounds.
-function addSeconds(hhmm, seconds) {
-  const [h, m] = hhmm.split(':').map(Number);
+// The arrival after a drive of any length: a wall-clock time plus how many
+// midnights it crossed. The day count is the point — a time alone cannot
+// distinguish a two-hour drive from a twenty-six hour one, and an end date set
+// from the time alone could never be more than one day on.
+function arrivalAfter(hhmm, seconds) {
+  const [h, m] = (hhmm || '').split(':').map(Number);
   if (Number.isNaN(h) || Number.isNaN(m)) return null;
-  const total = (((h * 60 + m + Math.round(seconds / 60)) % 1440) + 1440) % 1440;
-  return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+  const total = h * 60 + m + Math.round(seconds / 60);
+  const days = Math.floor(total / 1440);
+  const mins = ((total % 1440) + 1440) % 1440;
+  return {
+    time: `${String(Math.floor(mins / 60)).padStart(2, '0')}:${String(mins % 60).padStart(2, '0')}`,
+    days,
+  };
 }
 
 function formatDuration(seconds) {
@@ -1984,19 +2176,30 @@ function applyEndTimeEstimate() {
   const secs = routeCalc.durationSeconds;
   if (secs == null || !startEl.value) {
     if (endEl._derived) {
-      endEl.value = ''; estimatedEndValue = null;
+      endEl.value = ''; estimatedEndValue = null; estimatedEndDays = null;
       endEl._userSet = false; endEl._derived = false;
     }
     hint.textContent = '';
     return;
   }
-  const end = addSeconds(startEl.value, secs);
-  if (!end) return;
-  endEl.value = end;
-  estimatedEndValue = end;
+  const arrival = arrivalAfter(startEl.value, secs);
+  if (!arrival) return;
+  endEl.value = arrival.time;
+  estimatedEndValue = arrival.time;
+  // Kept so the end date follows the drive's real length rather than being
+  // re-inferred from the time, which cannot say more than "next day".
+  estimatedEndDays = arrival.days;
   endEl._userSet = true;
   endEl._derived = true;
-  hint.textContent = `Estimated from ${formatDuration(secs)} of driving — edit it if the trip ran differently.`;
+  syncTripEndDate();
+
+  // Said explicitly: an arrival on another date looks like a mistake unless the
+  // reason is on screen, and the trip date stays the day the trip set out.
+  const driving = `Estimated from ${formatDuration(secs)} of driving`;
+  hint.textContent = arrival.days === 0
+    ? `${driving} — edit it if the trip ran differently.`
+    : `${driving} — arrives ${arrival.days === 1 ? 'the next day' : `${arrival.days} days later`}. ` +
+      `The trip date stays the day you set out.`;
 }
 
 // Asks the server for the route's distance and duration, at most once per
@@ -2088,6 +2291,7 @@ function scheduleRouteEstimate() {
     if (e.target.value === estimatedEndValue) return;
     e.target._derived = false;
     document.getElementById('endTimeHint').textContent = '';
+    syncTripEndDate();
   }));
 
 
@@ -2100,7 +2304,11 @@ document.getElementById('tripVehicle').addEventListener('change', () => vehicleH
 // 'input' as well as 'change': a date is entered component by component, and
 // a restamp must not land on one the user is partway through typing.
 ['input', 'change'].forEach(ev =>
-  document.getElementById('tripDate').addEventListener(ev, e => { e.target._defaulted = false; }));
+  document.getElementById('tripDate').addEventListener(ev, e => {
+    e.target._defaulted = false;
+    // The implied end date counts from the trip date, so moving one moves both.
+    syncTripEndDate();
+  }));
 document.getElementById('editVehicle').addEventListener('change', () => vehicleHintChange('editVehicle', 'editVehicleHint'));
 
 
@@ -2294,6 +2502,10 @@ document.getElementById('logTripBtn').addEventListener('click', async () => {
   const tripDateError = validateTripDate(document.getElementById('tripDate').value);
   if (tripDateError) { showError(tripDateError); return; }
 
+  const endDateError = validateEndDate(document.getElementById('tripEndDate').value,
+                                       document.getElementById('tripDate').value);
+  if (endDateError) { showError(endDateError); return; }
+
   const btn = document.getElementById('logTripBtn');
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span> Logging…';
@@ -2314,6 +2526,7 @@ document.getElementById('logTripBtn').addEventListener('click', async () => {
     business_id: businessVal ? parseInt(businessVal) : null,
     notes:      document.getElementById('tripNotes').value,
     trip_date:  document.getElementById('tripDate').value      || null,
+    end_date:   document.getElementById('tripEndDate').value   || null,
     start_time: getTimeValue('tripStartTime'),
     end_time:   getTimeValue('tripEndTime'),
     client_today: localToday(),
@@ -2355,6 +2568,8 @@ document.getElementById('logTripBtn').addEventListener('click', async () => {
     document.getElementById('tripNotes').value = '';
     document.getElementById('tripNotesCounter').textContent = '';
     document.getElementById('tripDate').value      = '';
+    document.getElementById('tripEndDate').value   = '';
+    document.getElementById('tripEndDate')._userSet = false;
     initTimeInput('tripStartTime');
     initTimeInput('tripEndTime');
     // Re-stamp after clearing, so a second trip logged back-to-back gets the
@@ -2441,7 +2656,8 @@ function prependTripRow(trip, prepend = true) {
     headerInserted = true;
   }
 
-  const timeRangeTxt = formatTimeRange(trip.start_time, trip.end_time) || '–';
+  const timeRangeTxt = formatTimeRange(trip.start_time, trip.end_time,
+                                       trip.trip_date, trip.end_date) || '–';
   const dateTxt = trip.trip_date
     ? formatTripDate(trip.trip_date)
     : escHtml((trip.timestamp || '').replace(/\s+\d{1,2}:\d{2}\s*[AP]M$/i, '').trim());
@@ -2461,6 +2677,7 @@ function prependTripRow(trip, prepend = true) {
   row.dataset.attachments  = JSON.stringify(trip.attachments || []);
   row.dataset.vehicleSub  = trip.vehicle_sub  || '';
   row.dataset.tripDate    = trip.trip_date    || '';
+  row.dataset.endDate     = trip.end_date     || '';
   row.dataset.startTime   = trip.start_time   || '';
   row.dataset.endTime     = trip.end_time     || '';
   row.dataset.durationSeconds = trip.duration_seconds || '';
@@ -2469,7 +2686,7 @@ function prependTripRow(trip, prepend = true) {
   row.innerHTML = `
     <div class="trip-date">
       <div class="trip-date-main">${dateTxt}</div>
-      <div class="trip-time-display trip-sub" data-raw-start="${escHtml(trip.start_time||'')}" data-raw-end="${escHtml(trip.end_time||'')}">${timeRangeTxt}</div>
+      <div class="trip-time-display trip-sub" data-raw-start="${escHtml(trip.start_time||'')}" data-raw-end="${escHtml(trip.end_time||'')}" data-trip-date="${escHtml(trip.trip_date||'')}" data-end-date="${escHtml(trip.end_date||'')}">${timeRangeTxt}</div>
     </div>
     <div class="trip-loc">
       <div class="trip-loc-main" title="${escHtml(trip.start)}">${escHtml(trip.start)}</div>
@@ -2617,6 +2834,16 @@ function openEditModal(id) {
     el.value   = val;
     el._userSet = !!val;
   });
+  // Seeded after the times, because whether the stored end date counts as the
+  // user's own is decided by comparing it against what those times imply.
+  const editEnd = document.getElementById('editEndDate');
+  const stored  = row.dataset.endDate || '';
+  const implied = derivedEndDate(row.dataset.tripDate, row.dataset.startTime, row.dataset.endTime);
+  editEnd.value = stored;
+  // A stored date matching the times is derived and keeps following them; one
+  // that differs is a span only a person could have set, so it is left alone.
+  editEnd._userSet = !!stored && stored !== implied;
+  syncEditEndDate();
   checkEditSpeedLive();
   updateEditPlaceWarning();
   renderEditAttachments();
@@ -2694,6 +2921,10 @@ async function saveEdit() {
   const tripDateError = validateTripDate(document.getElementById('editTripDate').value);
   if (tripDateError) { alert(tripDateError); return; }
 
+  const endDateError = validateEndDate(document.getElementById('editEndDate').value,
+                                       document.getElementById('editTripDate').value);
+  if (endDateError) { alert(endDateError); return; }
+
   const btn = document.getElementById('saveEditBtn');
 
   // The distance in editingTrip is only valid for the route it was last
@@ -2722,6 +2953,7 @@ async function saveEdit() {
     business_id: businessVal ? parseInt(businessVal) : null,
     notes:      document.getElementById('editNotes').value,
     trip_date:  document.getElementById('editTripDate').value  || null,
+    end_date:   document.getElementById('editEndDate').value   || null,
     start_time: getTimeValue('editStartTime'),
     end_time:   getTimeValue('editEndTime'),
     client_today: localToday(),
@@ -2799,13 +3031,17 @@ function yearRowBlock(group) {
     rows.push([]);
   }
 
-  rows.push(['Start Location', 'Stops', 'End Location', 'Miles', 'Vehicle', 'Business', 'Trip Date', 'Start Time', 'End Time', 'Logged At', 'Notes']);
+  // ISO dates rather than "Oct 2, 2026": a spreadsheet sorts and filters these
+  // correctly, which is the point of exporting to one.
+  rows.push(['Start Location', 'Stops', 'End Location', 'Miles', 'Vehicle', 'Business',
+             'Start Date', 'Start Time', 'End Date', 'End Time', 'Logged At', 'Notes']);
   group.trips.forEach(t => rows.push([
     t.start, stopsText(t), t.end, t.miles ?? '',
     t.vehicle_name  || '',
     t.business_name || '',
     t.trip_date    || '',
     t.start_time   || '',
+    (t.end_date || derivedEndDate(t.trip_date, t.start_time, t.end_time) || ''),
     t.end_time     || '',
     t.timestamp,
     t.notes        || ''
@@ -2940,14 +3176,15 @@ const PDF_TRIP_COLUMN_STYLES = {
   2: { cellWidth: 44 },                    // End Location
   3: { cellWidth: 14, halign: 'right' },   // Miles
   4: { cellWidth: 26 },                    // Vehicle
-  5: { cellWidth: 20 },                    // Trip Date
-  6: { cellWidth: 16 },                    // Start Time
-  7: { cellWidth: 16 },                    // End Time
+  // 26mm each against the 20+16+16 the three separate date and time columns
+  // took, so the page total is unchanged and one column is freed.
+  5: { cellWidth: 26, overflow: 'linebreak' },  // Start (date and time)
+  6: { cellWidth: 26, overflow: 'linebreak' },  // End (date and time)
   // Notes wrap onto as many lines as they need inside this width, growing the
   // row rather than spilling into the next column or off the page. A fixed
   // width is what makes wrapping possible: an auto-sized column would stretch
   // to the longest note and push the other columns off a landscape page.
-  8: { cellWidth: 46, overflow: 'linebreak' },  // Notes
+  7: { cellWidth: 46, overflow: 'linebreak' },  // Notes
 };
 
 function exportPDF() {
@@ -3039,16 +3276,15 @@ function exportPDF() {
 
       doc.autoTable({
         startY: tableStartY,
-        head: [['Start Location', 'Stops', 'End Location', 'Miles', 'Vehicle', 'Trip Date', 'Start Time', 'End Time', 'Notes']],
+        head: [['Start Location', 'Stops', 'End Location', 'Miles', 'Vehicle', 'Start', 'End', 'Notes']],
         body: bGroup.trips.map(t => [
           t.start, stopsText(t), t.end, t.miles ?? '',
           t.vehicle_name || '',
-          t.trip_date    || '',
-          t.start_time   || '',
-          t.end_time     || '',
+          formatDateTime(t.trip_date, t.start_time),
+          formatDateTime(t.end_date || derivedEndDate(t.trip_date, t.start_time, t.end_time), t.end_time),
           t.notes        || ''
         ]),
-        foot: [['', '', 'Subtotal', Math.round(bMiles * 100) / 100, '', '', '', '', '']],
+        foot: [['', '', 'Subtotal', Math.round(bMiles * 100) / 100, '', '', '', '']],
         headStyles:  { fillColor: [79, 70, 229], fontSize: 7, fontStyle: 'bold' },
         footStyles:  { fillColor: [238, 242, 255], textColor: [79, 70, 229], fontStyle: 'bold', fontSize: 7 },
         bodyStyles:  { fontSize: 7, valign: 'top' },
@@ -3062,7 +3298,7 @@ function exportPDF() {
     doc.autoTable({
       startY: tableStartY,
       body: [],
-      foot: [['', '', `${yearLabel} total`, Math.round(yearMiles * 100) / 100, '', '', '', '', '']],
+      foot: [['', '', `${yearLabel} total`, Math.round(yearMiles * 100) / 100, '', '', '', '']],
       showHead: 'never',
       headStyles:  { fillColor: [79, 70, 229], fontSize: 7, fontStyle: 'bold' },
       footStyles:  { fillColor: [238, 242, 255], textColor: [79, 70, 229], fontStyle: 'bold', fontSize: 7 },

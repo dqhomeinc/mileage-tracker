@@ -38,6 +38,22 @@ jobs:
       - name: Check inline JS syntax
         run: python .github/scripts/check_js_syntax.py
 
+  # The date/time rules are pure functions with a lot of edge cases — midnight,
+  # month and year boundaries, leap days, multi-night trips, missing values — and
+  # getting one wrong either changes recorded mileage or silently suppresses the
+  # feasibility warning. Nothing else in CI calls them.
+  trip-times:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Check trip date and time rules
+        run: python .github/scripts/check_trip_times.py
+
   # CI has no DATABASE_URL, so a plain `import app` always falls back to
   # SQLite and never exercises the pg8000 connection or the Postgres branch
   # of _migrate_db() — both of which production actually depends on.
