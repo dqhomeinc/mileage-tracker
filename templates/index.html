@@ -378,6 +378,10 @@
     .datetime-grid {
       display: grid; grid-template-columns: 1fr 1fr; gap: 10px 12px; margin-top: 10px;
     }
+    /* The modal's date and time inputs carry no .form-input class of their own,
+       so they are sized here rather than stretching to their intrinsic width. */
+    .datetime-grid > * { min-width: 0; }
+    .datetime-grid input { width: 100%; box-sizing: border-box; }
     .form-input {
       width: 100%; padding: 10px 13px;
       border: 1.5px solid var(--border); border-radius: var(--radius-sm);
@@ -440,12 +444,6 @@
     .trip-actions { padding-top: 1px; }
 
     /* ── Edit modal extras ───────────────────── */
-    .modal-row-3 {
-      display: grid; grid-template-columns: 1fr 1fr 1fr;
-      gap: 10px; margin-bottom: 14px;
-    }
-    .modal-row-3 > * { min-width: 0; }
-    .modal-row-3 input { min-width: 0; width: 100%; }
     .modal-field select {
       width: 100%; padding: 11px 14px;
       border: 1.5px solid var(--border); border-radius: var(--radius-sm);
@@ -457,7 +455,7 @@
 
     @media (max-width: 480px) {
       .trip-extras-row { grid-template-columns: 1fr; }
-      .modal-row-3 { grid-template-columns: 1fr; }
+      .datetime-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -647,7 +645,7 @@
         <option value="">— No business (optional) —</option>
       </select>
     </div>
-    <div class="modal-row-3">
+    <div class="datetime-grid" style="margin-top:0;margin-bottom:14px">
       <div class="modal-field" style="margin-bottom:0">
         <label>Start Date</label>
         <input type="date" id="editTripDate">
@@ -657,15 +655,15 @@
         <input type="time" id="editStartTime">
       </div>
       <div class="modal-field" style="margin-bottom:0">
+        <label>End Date</label>
+        <input type="date" id="editEndDate">
+      </div>
+      <div class="modal-field" style="margin-bottom:0">
         <label>End Time</label>
         <input type="time" id="editEndTime">
       </div>
     </div>
-    <div class="modal-field" id="editEndDateRow">
-      <label>End Date</label>
-      <input type="date" id="editEndDate">
-      <div class="vehicle-hint" id="editEndDateHint"></div>
-    </div>
+    <div class="vehicle-hint" id="editEndDateHint" style="margin-top:-8px;margin-bottom:12px"></div>
     <div class="modal-field">
       <label>Notes</label>
       <textarea id="editNotes" class="trip-notes" maxlength="500"
