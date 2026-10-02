@@ -373,6 +373,11 @@
     /* ── Trip form extra fields ──────────────── */
     .trip-extras { margin-top: 16px; padding-top: 16px; border-top: 1.5px solid var(--border); }
     .trip-extras-row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; margin-top: 10px; }
+    /* Start date beside start time, end date beside end time. The pairing is
+       the layout, so neither row has to be labelled as a pair. */
+    .datetime-grid {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 10px 12px; margin-top: 10px;
+    }
     .form-input {
       width: 100%; padding: 10px 13px;
       border: 1.5px solid var(--border); border-radius: var(--radius-sm);
@@ -506,9 +511,9 @@
           <option value="">— No business (optional) —</option>
         </select>
       </div>
-      <div class="trip-extras-row">
+      <div class="datetime-grid">
         <div>
-          <label class="field-label" for="tripDate">Trip Date</label>
+          <label class="field-label" for="tripDate">Start Date</label>
           <input type="date" id="tripDate" class="form-input">
         </div>
         <div>
@@ -516,16 +521,13 @@
           <input type="time" id="tripStartTime" class="form-input">
         </div>
         <div>
+          <label class="field-label" for="tripEndDate">End Date</label>
+          <input type="date" id="tripEndDate" class="form-input">
+        </div>
+        <div>
           <label class="field-label" for="tripEndTime">End Time</label>
           <input type="time" id="tripEndTime" class="form-input">
         </div>
-      </div>
-      <!-- Only relevant once a trip does not end on the day it started, so it
-           stays hidden until that is the case rather than asking everyone for a
-           date they would set to the same value. -->
-      <div id="tripEndDateRow" class="d-none" style="margin-top:10px">
-        <label class="field-label" for="tripEndDate">End Date</label>
-        <input type="date" id="tripEndDate" class="form-input">
       </div>
       <div class="vehicle-hint" id="endTimeHint"></div>
       <div style="margin-top:12px">
@@ -647,7 +649,7 @@
     </div>
     <div class="modal-row-3">
       <div class="modal-field" style="margin-bottom:0">
-        <label>Trip Date</label>
+        <label>Start Date</label>
         <input type="date" id="editTripDate">
       </div>
       <div class="modal-field" style="margin-bottom:0">
@@ -775,23 +777,20 @@ function syncEditEndDateHint() {
   ['input', 'change'].forEach(ev =>
     document.getElementById(id).addEventListener(ev, syncEditEndDateHint)));
 
+// Keeps the end date in step with the times. The field is always on screen, so
+// this only fills it: it follows the times until the user sets it themselves, at
+// which point it is theirs — the same rule the end time follows.
 function syncTripEndDate() {
-  const row = document.getElementById('tripEndDateRow');
   const dateEl = document.getElementById('tripEndDate');
   const tripDate = document.getElementById('tripDate').value;
   const start = document.getElementById('tripStartTime').value;
   const end = document.getElementById('tripEndTime').value;
-  if (!row || !dateEl) return;
+  if (!dateEl) return;
 
   // The estimate knows how many days its drive spanned; a time the user typed
   // does not, so that falls back to what the clock alone can imply.
   const days = document.getElementById('tripEndTime')._derived ? estimatedEndDays : null;
-  const implied = derivedEndDate(tripDate, start, end, days);
-  if (!dateEl._userSet) dateEl.value = implied;
-  // Shown when the trip spans a night, or when the user has put a date in it
-  // themselves — hiding a field they filled would discard it silently.
-  const spans = !!dateEl.value && !!tripDate && dateEl.value !== tripDate;
-  row.classList.toggle('d-none', !(spans || dateEl._userSet));
+  if (!dateEl._userSet) dateEl.value = derivedEndDate(tripDate, start, end, days);
   dateEl.min = tripDate || '';
   dateEl.max = localToday();
 }
@@ -825,24 +824,36 @@ function dayOffset(startTime, endTime, tripDate, endDate) {
   return endsNextDay(startTime, endTime) ? 1 : 0;
 }
 
-// "+1 day" rather than the date itself: the row already shows the trip date
-// beside this, and the point is which day after it the arrival falls on.
+// A trip that ends on another day names that day beside its arrival time, rather
+// than carrying a "+1 day" the reader has to apply to a date elsewhere on the
+// row. The year is repeated only when the trip crosses into a different one.
 function formatTimeRange(s, e, tripDate, endDate) {
-  if (s && e) {
-    const days = dayOffset(s, e, tripDate, endDate);
-    const suffix = days > 0 ? ` (+${days} day${days === 1 ? '' : 's'})` : '';
-    return `${formatTime(s)} – ${formatTime(e)}${suffix}`;
+  if (!s && !e) return '';
+  if (!s || !e) return formatTime(s || e);
+  if (dayOffset(s, e, tripDate, endDate) <= 0) {
+    return `${formatTime(s)} – ${formatTime(e)}`;
   }
-  if (s) return formatTime(s);
-  if (e) return formatTime(e);
-  return '';
+  const shown = endDate || derivedEndDate(tripDate, s, e);
+  if (!shown) return `${formatTime(s)} – ${formatTime(e)}`;
+  const sameYear = !!tripDate && shown.slice(0, 4) === tripDate.slice(0, 4);
+  return `${formatTime(s)} – ${formatTripDate(shown, { withYear: !sameYear })} ${formatTime(e)}`;
 }
 
-function formatTripDate(dateStr) {
+const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+// withYear is dropped where the year is already established nearby — an end date
+// shown beside its start date repeats it for no one's benefit, unless the trip
+// happens to cross New Year.
+function formatTripDate(dateStr, { withYear = true } = {}) {
   if (!dateStr) return '';
   const [y, mo, d] = dateStr.split('-').map(Number);
-  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-  return `${months[mo - 1]} ${d}, ${y}`;
+  if ([y, mo, d].some(Number.isNaN)) return '';
+  return `${MONTH_NAMES[mo - 1]} ${d}${withYear ? `, ${y}` : ''}`;
+}
+
+// A date and a time as one phrase, for places that show a single moment.
+function formatDateTime(dateStr, hhmm) {
+  return [formatTripDate(dateStr), formatTime(hhmm)].filter(Boolean).join(' ');
 }
 
 function refreshTimeDisplays() {
@@ -2975,14 +2986,18 @@ function yearRowBlock(group) {
     rows.push([]);
   }
 
-  rows.push(['Start Location', 'Stops', 'End Location', 'Miles', 'Vehicle', 'Business', 'Trip Date', 'Start Time', 'End Time', 'Logged At', 'Notes']);
+  // ISO dates rather than "Oct 2, 2026": a spreadsheet sorts and filters these
+  // correctly, which is the point of exporting to one.
+  rows.push(['Start Location', 'Stops', 'End Location', 'Miles', 'Vehicle', 'Business',
+             'Start Date', 'Start Time', 'End Date', 'End Time', 'Logged At', 'Notes']);
   group.trips.forEach(t => rows.push([
     t.start, stopsText(t), t.end, t.miles ?? '',
     t.vehicle_name  || '',
     t.business_name || '',
     t.trip_date    || '',
     t.start_time   || '',
-    endTimeCell(t),
+    (t.end_date || derivedEndDate(t.trip_date, t.start_time, t.end_time) || ''),
+    t.end_time     || '',
     t.timestamp,
     t.notes        || ''
   ]));
@@ -3028,17 +3043,6 @@ function exportExcel() {
 // Trips are grouped by year for the PDF export (one page per year). A trip's
 // year comes from its trip_date when set, else the year embedded in its
 // "MMM DD, YYYY h:mm AM/PM" logged-at timestamp string.
-// The end time as an export cell. A spreadsheet or a printed log has no other
-// way to tell that 01:00 is after 23:30, so the day it lands on is spelled out
-// next to it rather than left to be inferred from the times being "backwards".
-function endTimeCell(trip) {
-  if (!trip.end_time) return '';
-  const days = dayOffset(trip.start_time, trip.end_time, trip.trip_date, trip.end_date);
-  if (days <= 0) return trip.end_time;
-  return `${trip.end_time} (+${days} day${days === 1 ? '' : 's'}` +
-         `${trip.end_date ? ', ' + trip.end_date : ''})`;
-}
-
 // Stops for export, in visit order. "; " rather than an arrow: jsPDF's built-in
 // fonts have no glyph for "→" and would print garbage in its place.
 function stopsText(t) { return (t.stops || []).map(st => st.label).join('; '); }
@@ -3127,14 +3131,15 @@ const PDF_TRIP_COLUMN_STYLES = {
   2: { cellWidth: 44 },                    // End Location
   3: { cellWidth: 14, halign: 'right' },   // Miles
   4: { cellWidth: 26 },                    // Vehicle
-  5: { cellWidth: 20 },                    // Trip Date
-  6: { cellWidth: 16 },                    // Start Time
-  7: { cellWidth: 16 },                    // End Time
+  // 26mm each against the 20+16+16 the three separate date and time columns
+  // took, so the page total is unchanged and one column is freed.
+  5: { cellWidth: 26, overflow: 'linebreak' },  // Start (date and time)
+  6: { cellWidth: 26, overflow: 'linebreak' },  // End (date and time)
   // Notes wrap onto as many lines as they need inside this width, growing the
   // row rather than spilling into the next column or off the page. A fixed
   // width is what makes wrapping possible: an auto-sized column would stretch
   // to the longest note and push the other columns off a landscape page.
-  8: { cellWidth: 46, overflow: 'linebreak' },  // Notes
+  7: { cellWidth: 46, overflow: 'linebreak' },  // Notes
 };
 
 function exportPDF() {
@@ -3226,16 +3231,15 @@ function exportPDF() {
 
       doc.autoTable({
         startY: tableStartY,
-        head: [['Start Location', 'Stops', 'End Location', 'Miles', 'Vehicle', 'Trip Date', 'Start Time', 'End Time', 'Notes']],
+        head: [['Start Location', 'Stops', 'End Location', 'Miles', 'Vehicle', 'Start', 'End', 'Notes']],
         body: bGroup.trips.map(t => [
           t.start, stopsText(t), t.end, t.miles ?? '',
           t.vehicle_name || '',
-          t.trip_date    || '',
-          t.start_time   || '',
-          endTimeCell(t),
+          formatDateTime(t.trip_date, t.start_time),
+          formatDateTime(t.end_date || derivedEndDate(t.trip_date, t.start_time, t.end_time), t.end_time),
           t.notes        || ''
         ]),
-        foot: [['', '', 'Subtotal', Math.round(bMiles * 100) / 100, '', '', '', '', '']],
+        foot: [['', '', 'Subtotal', Math.round(bMiles * 100) / 100, '', '', '', '']],
         headStyles:  { fillColor: [79, 70, 229], fontSize: 7, fontStyle: 'bold' },
         footStyles:  { fillColor: [238, 242, 255], textColor: [79, 70, 229], fontStyle: 'bold', fontSize: 7 },
         bodyStyles:  { fontSize: 7, valign: 'top' },
@@ -3249,7 +3253,7 @@ function exportPDF() {
     doc.autoTable({
       startY: tableStartY,
       body: [],
-      foot: [['', '', `${yearLabel} total`, Math.round(yearMiles * 100) / 100, '', '', '', '', '']],
+      foot: [['', '', `${yearLabel} total`, Math.round(yearMiles * 100) / 100, '', '', '', '']],
       showHead: 'never',
       headStyles:  { fillColor: [79, 70, 229], fontSize: 7, fontStyle: 'bold' },
       footStyles:  { fillColor: [238, 242, 255], textColor: [79, 70, 229], fontStyle: 'bold', fontSize: 7 },
