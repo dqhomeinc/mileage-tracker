@@ -709,8 +709,21 @@ function formatTime(hhmm) {
   return `${h % 12 || 12}:${String(m).padStart(2,'0')} ${ampm}`;
 }
 
+// Mirrors _ends_next_day() in main.py: an end time strictly earlier than the
+// start is the only way one trip date can say the clock crossed midnight.
+// Strictly earlier, so equal times stay a zero-length trip.
+function endsNextDay(start, end) {
+  if (!start || !end) return false;
+  const mins = v => { const [h, m] = v.split(':').map(Number);
+                      return Number.isNaN(h) || Number.isNaN(m) ? null : h * 60 + m; };
+  const s = mins(start), e = mins(end);
+  return s !== null && e !== null && e < s;
+}
+
+// "+1 day" rather than the date itself: the row already shows the trip date
+// beside this, and the point is that the arrival is on the following one.
 function formatTimeRange(s, e) {
-  if (s && e) return `${formatTime(s)} – ${formatTime(e)}`;
+  if (s && e) return `${formatTime(s)} – ${formatTime(e)}${endsNextDay(s, e) ? ' (+1 day)' : ''}`;
   if (s) return formatTime(s);
   if (e) return formatTime(e);
   return '';
@@ -1906,7 +1919,10 @@ function elapsedSeconds(startTime, endTime) {
   const [eh, em] = endTime.split(':').map(Number);
   if ([sh, sm, eh, em].some(Number.isNaN)) return null;
   let startMin = sh * 60 + sm, endMin = eh * 60 + em;
-  if (endMin <= startMin) endMin += 24 * 60;
+  // Strictly earlier, matching endsNextDay(): equal times are a zero-length
+  // trip, and reading them as a full day round-trip produced a nonsense
+  // "much longer than typical" warning.
+  if (endMin < startMin) endMin += 24 * 60;
   return (endMin - startMin) * 60;
 }
 
@@ -1996,7 +2012,13 @@ function applyEndTimeEstimate() {
   estimatedEndValue = end;
   endEl._userSet = true;
   endEl._derived = true;
-  hint.textContent = `Estimated from ${formatDuration(secs)} of driving — edit it if the trip ran differently.`;
+  // Said explicitly: an arrival time earlier than the departure looks like a
+  // mistake unless the reason is on screen, and the trip date stays the day the
+  // trip started.
+  hint.textContent = endsNextDay(startEl.value, end)
+    ? `Estimated from ${formatDuration(secs)} of driving — arrives the next day. ` +
+      `The trip date stays the day you set out.`
+    : `Estimated from ${formatDuration(secs)} of driving — edit it if the trip ran differently.`;
 }
 
 // Asks the server for the route's distance and duration, at most once per
@@ -2806,7 +2828,7 @@ function yearRowBlock(group) {
     t.business_name || '',
     t.trip_date    || '',
     t.start_time   || '',
-    t.end_time     || '',
+    endTimeCell(t),
     t.timestamp,
     t.notes        || ''
   ]));
@@ -2852,6 +2874,16 @@ function exportExcel() {
 // Trips are grouped by year for the PDF export (one page per year). A trip's
 // year comes from its trip_date when set, else the year embedded in its
 // "MMM DD, YYYY h:mm AM/PM" logged-at timestamp string.
+// The end time as an export cell. A spreadsheet or a printed log has no other
+// way to tell that 01:00 is after 23:30, so the day it lands on is spelled out
+// next to it rather than left to be inferred from the times being "backwards".
+function endTimeCell(trip) {
+  if (!trip.end_time) return '';
+  return endsNextDay(trip.start_time, trip.end_time)
+    ? `${trip.end_time} (+1 day${trip.end_date ? ', ' + trip.end_date : ''})`
+    : trip.end_time;
+}
+
 // Stops for export, in visit order. "; " rather than an arrow: jsPDF's built-in
 // fonts have no glyph for "→" and would print garbage in its place.
 function stopsText(t) { return (t.stops || []).map(st => st.label).join('; '); }
@@ -3045,7 +3077,7 @@ function exportPDF() {
           t.vehicle_name || '',
           t.trip_date    || '',
           t.start_time   || '',
-          t.end_time     || '',
+          endTimeCell(t),
           t.notes        || ''
         ]),
         foot: [['', '', 'Subtotal', Math.round(bMiles * 100) / 100, '', '', '', '', '']],

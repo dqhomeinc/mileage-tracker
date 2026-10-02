@@ -2,7 +2,7 @@ import base64
 import json
 import os
 import re
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 import requests
 from dotenv import load_dotenv
 from itsdangerous import URLSafeTimedSerializer, SignatureExpired, BadSignature
@@ -220,6 +220,13 @@ def _trip_dict(trip, vehicle_name=None, vehicle_sub=None, business_name=None,
         'trip_date':    trip.trip_date,
         'start_time':   trip.start_time,
         'end_time':     trip.end_time,
+        # Derived rather than stored: a single trip date plus an end time
+        # earlier than the start already says the trip crossed midnight, and a
+        # trip cannot run longer than a day in this model. Sent from here so the
+        # history row, the edit modal and all three exports read one value
+        # instead of each re-deriving it.
+        'ends_next_day': _ends_next_day(trip.start_time, trip.end_time),
+        'end_date':      _end_date(trip.trip_date, trip.start_time, trip.end_time),
         'duration_seconds': trip.duration_seconds,
         'notes':        trip.notes,
         'stops':        _stops_from_db(trip.stops),
@@ -517,18 +524,48 @@ def calculate_driving_miles(start_text, end_text,
     return miles, _parse_route_duration(route.get('duration')), endpoints
 
 
-def _elapsed_seconds(start_time, end_time):
-    """Seconds between two 'HH:MM' strings, assuming midnight wraparound
-    if end <= start. None if either is missing/unparseable."""
-    if not start_time or not end_time:
-        return None
+def _minutes_of_day(value):
+    """Minutes since midnight for an 'HH:MM' string, or None."""
     try:
-        sh, sm = map(int, start_time.split(':'))
-        eh, em = map(int, end_time.split(':'))
+        h, m = map(int, (value or '').split(':'))
     except (ValueError, AttributeError):
         return None
-    start_min, end_min = sh * 60 + sm, eh * 60 + em
-    if end_min <= start_min:
+    return h * 60 + m
+
+
+def _ends_next_day(start_time, end_time):
+    """Whether a trip's end time falls on the day after its start.
+
+    A trip that leaves at 23:30 and arrives at 01:00 has an end time earlier
+    than its start, which is the only way a single trip date can express
+    crossing midnight. Strictly earlier: equal times are a zero-length trip, not
+    a twenty-four-hour one.
+    """
+    start, end = _minutes_of_day(start_time), _minutes_of_day(end_time)
+    if start is None or end is None:
+        return False
+    return end < start
+
+
+def _end_date(trip_date, start_time, end_time):
+    """The date the trip ended on: its trip date, or the day after when the
+    clock has wrapped past midnight. None when there is no trip date to count
+    from."""
+    parsed = _parse_iso_date(trip_date)
+    if not parsed:
+        return None
+    if _ends_next_day(start_time, end_time):
+        parsed += timedelta(days=1)
+    return parsed.isoformat()
+
+
+def _elapsed_seconds(start_time, end_time):
+    """Seconds between two 'HH:MM' strings, counting an end earlier than the
+    start as the next day. None if either is missing/unparseable."""
+    start_min, end_min = _minutes_of_day(start_time), _minutes_of_day(end_time)
+    if start_min is None or end_min is None:
+        return None
+    if end_min < start_min:
         end_min += 24 * 60
     return (end_min - start_min) * 60
 
