@@ -692,7 +692,12 @@ def validate_end_date(end_date, trip_date, start_time=None, end_time=None):
         # comes out negative, and check_trip_feasibility treats anything at or
         # below zero as unknown and says nothing at all. The UI cannot produce
         # it, which is exactly why the server has to.
-        if _elapsed_seconds(start_time, end_time, trip_date, end_date) < 0:
+        #
+        # None rather than a number means the span is unknown — a missing or
+        # unparseable start time — and there is then nothing for the dates to
+        # contradict. Compared explicitly, because None < 0 raises.
+        elapsed = _elapsed_seconds(start_time, end_time, trip_date, end_date)
+        if elapsed is not None and elapsed < 0:
             return 'The trip cannot end before it starts.'
     return None
 

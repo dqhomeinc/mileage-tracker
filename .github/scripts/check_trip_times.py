@@ -23,12 +23,29 @@ import main  # noqa: E402
 failures = []
 
 
+def _value(actual):
+    """Resolve a callable to its result, or to the exception it raised.
+
+    Passing a lambda is how a case says "this must not raise" — an exception
+    then reads as a named failure beside the others instead of aborting the
+    script with a traceback and taking the remaining checks with it.
+    """
+    if not callable(actual):
+        return actual
+    try:
+        return actual()
+    except Exception as exc:  # noqa: BLE001 — reporting, not handling
+        return f'raised {type(exc).__name__}: {exc}'
+
+
 def expect(label, actual, wanted):
+    actual = _value(actual)
     if actual != wanted:
         failures.append(f'{label}: expected {wanted!r}, got {actual!r}')
 
 
 def expect_error(label, actual, fragment):
+    actual = _value(actual)
     if not actual or fragment not in actual:
         failures.append(f'{label}: expected an error containing {fragment!r}, got {actual!r}')
 
@@ -92,6 +109,17 @@ expect_error('an end date with no end time',
 # Reachable only through the API: the UI derives the date from the times.
 expect_error('the same day, ending before it starts',
              main.validate_end_date('2026-10-02', '2026-10-02', '14:00', '08:00'), 'before it starts')
+# An unknown span has nothing for the dates to contradict, and must not raise on
+# the way to saying so. A cleared start-time field reaches this from the UI too.
+expect('a missing start time is accepted, not an exception',
+       lambda: main.validate_end_date('2026-10-03', '2026-10-02', None, '01:00'), None)
+expect('an unparseable start time likewise',
+       lambda: main.validate_end_date('2026-10-03', '2026-10-02', 'half nine', '01:00'), None)
+expect('a missing start time on the same day likewise',
+       lambda: main.validate_end_date('2026-10-02', '2026-10-02', None, '01:00'), None)
+expect('both times missing is just the end-time refusal',
+       lambda: main.validate_end_date('2026-10-02', '2026-10-02', None, None),
+       'An end date needs an end time.')
 
 # ── check_trip_feasibility: the dates must reach it ───────────────────────
 expect('a plausible overnight trip is quiet',
