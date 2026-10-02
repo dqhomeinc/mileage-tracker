@@ -9,6 +9,7 @@ from itsdangerous import URLSafeTimedSerializer, SignatureExpired, BadSignature
 from flask import (Flask, render_template, request, redirect, url_for, jsonify, flash,
                    session, Response)
 from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy.orm import defer
 from flask_login import (
     LoginManager, UserMixin, login_user, logout_user,
     login_required, current_user
@@ -201,7 +202,11 @@ def _business_dict(b):
             'is_default': b.id == current_user.default_business_id}
 
 
-def _trip_dict(trip, vehicle_name=None, vehicle_sub=None, business_name=None):
+def _trip_dict(trip, vehicle_name=None, vehicle_sub=None, business_name=None,
+               attachments=None):
+    """attachments is passed in by callers listing several trips, which fetch
+    them for the whole page in one query; a single-trip caller leaves it out and
+    one lookup is done here."""
     return {
         'id':           trip.id,
         'start':        trip.start_location,
@@ -221,9 +226,8 @@ def _trip_dict(trip, vehicle_name=None, vehicle_sub=None, business_name=None):
         'stops':        _stops_from_db(trip.stops),
         'start_place_id': trip.start_place_id,
         'end_place_id':   trip.end_place_id,
-        'attachments':  [_attachment_dict(a) for a in
-                         TripAttachment.query.filter_by(trip_id=trip.id)
-                         .order_by(TripAttachment.id).all()],
+        'attachments':  (attachments if attachments is not None
+                         else _attachments_by_trip([trip.id]).get(trip.id, [])),
     }
 
 
@@ -963,12 +967,15 @@ def history():
         key=lambda t: (t.trip_date or (t.timestamp.strftime('%Y-%m-%d') if t.timestamp else ''), t.id),
         reverse=True
     )
+    # One query for the whole page's attachments rather than one per trip.
+    attachments = _attachments_by_trip([t.id for t in trips])
     return jsonify([
         _trip_dict(
             t,
             t.vehicle.name if t.vehicle else None,
             ' '.join(filter(None, [t.vehicle.year, t.vehicle.make, t.vehicle.model])) if t.vehicle else None,
-            t.business.name if t.business else None
+            t.business.name if t.business else None,
+            attachments=attachments.get(t.id, []),
         )
         for t in trips
     ])
@@ -1076,9 +1083,17 @@ def _owned_trip(trip_id):
     return Trip.query.filter_by(id=trip_id, user_id=current_user.id).first()
 
 
-def _owned_attachment(att_id):
-    """The attachment if the current user owns the trip it belongs to."""
-    return (TripAttachment.query
+def _owned_attachment(att_id, with_data=True):
+    """The attachment if the current user owns the trip it belongs to.
+
+    with_data=False leaves the bytes in the database, for callers that only need
+    to know the row exists and is theirs — deleting it, say, which otherwise
+    reads up to 5MB out of Postgres on its way to discarding it.
+    """
+    query = TripAttachment.query
+    if not with_data:
+        query = query.options(defer(TripAttachment.data))
+    return (query
             .join(Trip, TripAttachment.trip_id == Trip.id)
             .filter(TripAttachment.id == att_id, Trip.user_id == current_user.id)
             .first())
@@ -1110,7 +1125,7 @@ def upload_attachment(trip_id):
     if not file or not file.filename:
         return jsonify({'error': 'No file provided.'}), 400
 
-    existing = TripAttachment.query.filter_by(trip_id=trip.id).count()
+    existing = TripAttachment.query.filter_by(trip_id=trip.id).count()  # COUNT only, no bytes
     if existing >= MAX_ATTACHMENTS_PER_TRIP:
         return jsonify({'error': f'A trip can have at most {MAX_ATTACHMENTS_PER_TRIP} attachments.'}), 400
 
@@ -1152,7 +1167,7 @@ def download_attachment(att_id):
 @app.route('/attachment/<int:att_id>', methods=['DELETE'])
 @login_required
 def delete_attachment(att_id):
-    att = _owned_attachment(att_id)
+    att = _owned_attachment(att_id, with_data=False)
     if not att:
         return jsonify({'error': 'Attachment not found.'}), 404
     db.session.delete(att)
@@ -1455,6 +1470,26 @@ def sniff_attachment_type(raw):
                                              b'heis', b'hevm', b'mif1', b'msf1'):
         return 'image/heic'
     return None
+
+
+# Attachment metadata for any number of trips, in one query, grouped by trip.
+#
+# The data column is deferred, and that matters more than it looks: a listing
+# needs names and sizes only, and selecting the bytes would pull every receipt
+# the user owns out of Postgres to render a paperclip count — up to 10 files of
+# 5MB per trip, per request. Taking them a trip at a time made it an N+1 on top.
+def _attachments_by_trip(trip_ids):
+    if not trip_ids:
+        return {}
+    rows = (TripAttachment.query
+            .options(defer(TripAttachment.data))
+            .filter(TripAttachment.trip_id.in_(trip_ids))
+            .order_by(TripAttachment.trip_id, TripAttachment.id)
+            .all())
+    grouped = {}
+    for row in rows:
+        grouped.setdefault(row.trip_id, []).append(_attachment_dict(row))
+    return grouped
 
 
 def _attachment_dict(att):
