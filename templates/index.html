@@ -736,17 +736,19 @@ function addDays(tripDate, days) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
-// Mirrors validate_end_date() in main.py, so the same refusal arrives before a
-// round trip rather than after one. The future case is worth naming carefully:
-// an estimated arrival in the future means the trip is not over yet, which
-// usually means the trip date is wrong rather than the end date.
+const MAX_TRIP_DAYS = 30;
+
+// Mirrors validate_end_date() in main.py. An end date in the future is allowed:
+// a trip that sets out at 23:30 and arrives at 01:00 is logged before it ends,
+// and the start time defaults to now, so refusing that would refuse the very
+// case the estimate exists for.
 function validateEndDate(endDate, tripDate) {
   if (!endDate) return null;
   if (!/^\d{4}-\d{2}-\d{2}$/.test(endDate)) return 'Please enter a valid end date.';
-  if (tripDate && endDate < tripDate) return 'End date cannot be before the trip date.';
-  if (endDate > localToday()) {
-    return 'That trip would end in the future — check the trip date, or set the end date yourself.';
-  }
+  if (!tripDate) return null;
+  if (endDate < tripDate) return 'End date cannot be before the trip date.';
+  const days = Math.round((new Date(endDate) - new Date(tripDate)) / 86400000);
+  if (days > MAX_TRIP_DAYS) return `A trip cannot run longer than ${MAX_TRIP_DAYS} days.`;
   return null;
 }
 
@@ -761,6 +763,29 @@ function derivedEndDate(tripDate, start, end, days = null) {
 // end time follows.
 // Says how long the modal's trip spans, so a date two days after the trip date
 // reads as deliberate rather than as a typo.
+// The modal's end date followed nothing: it was prefilled from the stored trip
+// and then sent back unchanged, so editing an overnight trip to end at 22:00
+// kept the next day's date and stored a 24-hour trip. It now tracks the times
+// the same way the log form's does.
+//
+// Whether the stored date counts as the user's own is decided by comparing it
+// against what the stored times imply: a date that matches is derived and should
+// keep following, while one that differs can only have been set deliberately —
+// a multi-day trip — and must not be overwritten.
+function syncEditEndDate() {
+  const dateEl = document.getElementById('editEndDate');
+  const tripDate = document.getElementById('editTripDate').value;
+  if (!dateEl) return;
+  if (!dateEl._userSet) {
+    dateEl.value = derivedEndDate(tripDate,
+                                  document.getElementById('editStartTime').value,
+                                  document.getElementById('editEndTime').value);
+  }
+  dateEl.min = tripDate || '';
+  dateEl.removeAttribute('max');
+  syncEditEndDateHint();
+}
+
 function syncEditEndDateHint() {
   const hint = document.getElementById('editEndDateHint');
   if (!hint) return;
@@ -773,9 +798,16 @@ function syncEditEndDateHint() {
     : days > 1 ? `Ends ${days} days later.` : 'End date is before the trip date.';
 }
 
-['editTripDate', 'editEndDate'].forEach(id =>
+// A date the user types into the end field is theirs; clearing it hands it back.
+['input', 'change'].forEach(ev =>
+  document.getElementById('editEndDate').addEventListener(ev, e => {
+    e.target._userSet = !!e.target.value;
+    syncEditEndDateHint();
+  }));
+// Anything that moves the span re-derives the end date.
+['editTripDate', 'editStartTime', 'editEndTime'].forEach(id =>
   ['input', 'change'].forEach(ev =>
-    document.getElementById(id).addEventListener(ev, syncEditEndDateHint)));
+    document.getElementById(id).addEventListener(ev, syncEditEndDate)));
 
 // Keeps the end date in step with the times. The field is always on screen, so
 // this only fills it: it follows the times until the user sets it themselves, at
@@ -792,7 +824,8 @@ function syncTripEndDate() {
   const days = document.getElementById('tripEndTime')._derived ? estimatedEndDays : null;
   if (!dateEl._userSet) dateEl.value = derivedEndDate(tripDate, start, end, days);
   dateEl.min = tripDate || '';
-  dateEl.max = localToday();
+  // No max: a trip logged as it sets out legitimately ends tomorrow.
+  dateEl.removeAttribute('max');
 }
 
 ['input', 'change'].forEach(ev =>
@@ -2786,19 +2819,22 @@ function openEditModal(id) {
   const selOpt = vehicleSel.options[vehicleSel.selectedIndex];
   document.getElementById('editVehicleHint').textContent = selOpt?.dataset.sub || '';
   document.getElementById('editTripDate').value  = row.dataset.tripDate  || '';
-  // Always shown in the modal, unlike the log form: a trip being edited may
-  // already span nights, and hiding the field would make that uneditable.
-  const editEnd = document.getElementById('editEndDate');
-  editEnd.value = row.dataset.endDate || '';
-  editEnd.min   = row.dataset.tripDate || '';
-  editEnd.max   = localToday();
-  syncEditEndDateHint();
   ['editStartTime', 'editEndTime'].forEach((id, i) => {
     const val = [row.dataset.startTime, row.dataset.endTime][i] || '';
     const el  = document.getElementById(id);
     el.value   = val;
     el._userSet = !!val;
   });
+  // Seeded after the times, because whether the stored end date counts as the
+  // user's own is decided by comparing it against what those times imply.
+  const editEnd = document.getElementById('editEndDate');
+  const stored  = row.dataset.endDate || '';
+  const implied = derivedEndDate(row.dataset.tripDate, row.dataset.startTime, row.dataset.endTime);
+  editEnd.value = stored;
+  // A stored date matching the times is derived and keeps following them; one
+  // that differs is a span only a person could have set, so it is left alone.
+  editEnd._userSet = !!stored && stored !== implied;
+  syncEditEndDate();
   checkEditSpeedLive();
   updateEditPlaceWarning();
   renderEditAttachments();

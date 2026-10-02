@@ -649,24 +649,33 @@ def _parse_iso_date(value):
         return None
 
 
+# A sane ceiling on how long one trip can run, so a mistyped year is still
+# caught. Not a judgement about real trips: anything within a month is accepted.
+MAX_TRIP_DAYS = 30
+
+
 def validate_end_date(end_date, trip_date, client_today=None):
     """Error string if end_date is unusable, else None. Optional, like the trip
     date: None/empty means "derive it from the times".
 
-    Judged against the client's own date for the same reason validate_trip_date
-    is — a browser and the server can disagree on the day near midnight.
+    Deliberately not refused for being in the future. A trip is logged as it is
+    taken — the start time defaults to now — so one that sets out at 23:30 and
+    arrives at 01:00 is logged before it ends, and its end date is tomorrow. The
+    trip must already have started, which validate_trip_date enforces; when it
+    finishes is a consequence of its length, not something to police. A mistyped
+    year is caught by the span instead.
     """
     if not end_date:
         return None
     parsed = _parse_iso_date(end_date)
     if not parsed:
         return f'"{end_date}" is not a valid date.'
-    today = _parse_iso_date(client_today) or date.today()
-    if parsed > today:
-        return 'End date cannot be in the future.'
     start = _parse_iso_date(trip_date)
-    if start and parsed < start:
-        return 'End date cannot be before the trip date.'
+    if start:
+        if parsed < start:
+            return 'End date cannot be before the trip date.'
+        if (parsed - start).days > MAX_TRIP_DAYS:
+            return f'A trip cannot run longer than {MAX_TRIP_DAYS} days.'
     return None
 
 
