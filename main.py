@@ -226,13 +226,10 @@ def _trip_dict(trip, vehicle_name=None, vehicle_sub=None, business_name=None,
         'trip_date':    trip.trip_date,
         'start_time':   trip.start_time,
         'end_time':     trip.end_time,
-        # Derived rather than stored: a single trip date plus an end time
-        # earlier than the start already says the trip crossed midnight, and a
-        # trip cannot run longer than a day in this model. Sent from here so the
-        # history row, the edit modal and all three exports read one value
-        # instead of each re-deriving it.
-        # Stored when known, otherwise implied by the times, so a trip logged
-        # before the column existed still reports an end date.
+        # Stored on the trip, falling back to what its times imply for rows
+        # logged before the column existed. Sent from here so the history row,
+        # the edit modal and all three exports read one value rather than each
+        # working it out again.
         'end_date':      _trip_end_date(trip),
         'ends_next_day': (_trip_end_date(trip) or trip.trip_date) != trip.trip_date,
         'duration_seconds': trip.duration_seconds,
@@ -546,6 +543,11 @@ def _minutes_of_day(value):
 def _ends_next_day(start_time, end_time):
     """Whether a trip's end time falls on the day after its start.
 
+    Mirrored by endsNextDay() in index.html, as _derived_end_date,
+    _elapsed_seconds and validate_end_date are by their own counterparts —
+    the form has to show an answer before it submits one. Keep the pairs in step;
+    .github/scripts/check_trip_times.py is the record of what these rules are.
+
     A trip that leaves at 23:30 and arrives at 01:00 has an end time earlier
     than its start, which is the only way a single trip date can express
     crossing midnight. Strictly earlier: equal times are a zero-length trip, not
@@ -654,7 +656,7 @@ def _parse_iso_date(value):
 MAX_TRIP_DAYS = 30
 
 
-def validate_end_date(end_date, trip_date, client_today=None):
+def validate_end_date(end_date, trip_date, start_time=None, end_time=None):
     """Error string if end_date is unusable, else None. Optional, like the trip
     date: None/empty means "derive it from the times".
 
@@ -664,18 +666,34 @@ def validate_end_date(end_date, trip_date, client_today=None):
     trip must already have started, which validate_trip_date enforces; when it
     finishes is a consequence of its length, not something to police. A mistyped
     year is caught by the span instead.
+
+    The times are checked alongside the dates because the four values have to
+    agree with each other, and only some combinations are reachable through the
+    UI. An API client is not bound by what the form happens to allow.
     """
     if not end_date:
         return None
     parsed = _parse_iso_date(end_date)
     if not parsed:
         return f'"{end_date}" is not a valid date.'
+    # An end date describes when an end time happened, so one without the other
+    # would be stored and reported as a day the trip ended on, for a trip that
+    # has no recorded end.
+    if not end_time:
+        return 'An end date needs an end time.'
     start = _parse_iso_date(trip_date)
     if start:
         if parsed < start:
             return 'End date cannot be before the trip date.'
         if (parsed - start).days > MAX_TRIP_DAYS:
             return f'A trip cannot run longer than {MAX_TRIP_DAYS} days.'
+        # The two together must describe forward motion. Same day with an end
+        # time earlier than the start is the case that slips through: elapsed
+        # comes out negative, and check_trip_feasibility treats anything at or
+        # below zero as unknown and says nothing at all. The UI cannot produce
+        # it, which is exactly why the server has to.
+        if _elapsed_seconds(start_time, end_time, trip_date, end_date) < 0:
+            return 'The trip cannot end before it starts.'
     return None
 
 
@@ -977,8 +995,12 @@ def log_trip():
     if date_error:
         return jsonify({'error': date_error}), 400
 
-    end_date  = (data.get('end_date') or '').strip() or None
-    date_error = validate_end_date(end_date, trip_date, client_today=data.get('client_today'))
+    # Parsed here rather than further down, because the end date is only valid
+    # in relation to the times it describes.
+    start_time = (data.get('start_time') or '').strip() or None
+    end_time   = (data.get('end_time')   or '').strip() or None
+    end_date   = (data.get('end_date')   or '').strip() or None
+    date_error = validate_end_date(end_date, trip_date, start_time, end_time)
     if date_error:
         return jsonify({'error': date_error}), 400
 
@@ -1009,9 +1031,6 @@ def log_trip():
             distance_error = 'Could not calculate distance automatically. Edit this trip to add it later.'
 
     vehicle_id  = data.get('vehicle_id') or None
-    start_time  = (data.get('start_time')  or '').strip() or None
-    end_time    = (data.get('end_time')    or '').strip() or None
-
     vehicle_name = vehicle_sub = None
     if vehicle_id:
         v = Vehicle.query.filter_by(id=int(vehicle_id), user_id=current_user.id).first()
@@ -1104,17 +1123,18 @@ def update_trip(trip_id):
     if date_error:
         return jsonify({'error': date_error}), 400
 
-    end_date  = (data.get('end_date') or '').strip() or None
-    date_error = validate_end_date(end_date, trip_date, client_today=data.get('client_today'))
+    # Parsed here rather than further down, because the end date is only valid
+    # in relation to the times it describes.
+    start_time = (data.get('start_time') or '').strip() or None
+    end_time   = (data.get('end_time')   or '').strip() or None
+    end_date   = (data.get('end_date')   or '').strip() or None
+    date_error = validate_end_date(end_date, trip_date, start_time, end_time)
     if date_error:
         return jsonify({'error': date_error}), 400
 
     distance_miles = float(distance_miles) if distance_miles is not None else None
 
     vehicle_id  = data.get('vehicle_id') or None
-    start_time  = (data.get('start_time')  or '').strip() or None
-    end_time    = (data.get('end_time')    or '').strip() or None
-
     vehicle_name = vehicle_sub = None
     if vehicle_id:
         v = Vehicle.query.filter_by(id=int(vehicle_id), user_id=current_user.id).first()

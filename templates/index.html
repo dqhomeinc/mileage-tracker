@@ -838,6 +838,17 @@ function syncTripEndDate() {
 // Mirrors _ends_next_day() in main.py: an end time strictly earlier than the
 // start is the only way one trip date can say the clock crossed midnight.
 // Strictly earlier, so equal times stay a zero-length trip.
+//
+// This and derivedEndDate() and elapsedSeconds() all restate server rules,
+// because the form has to show an answer before it submits anything. The server
+// decides what is stored and never trusts these, so a drift shows up as the page
+// disagreeing with what it saved rather than as bad data — but keep the pairs in
+// step, and keep .github/scripts/check_trip_times.py as the record of what the
+// rules are:
+//   endsNextDay     ↔ _ends_next_day
+//   derivedEndDate  ↔ _derived_end_date
+//   elapsedSeconds  ↔ _elapsed_seconds
+//   validateEndDate ↔ validate_end_date
 function endsNextDay(start, end) {
   if (!start || !end) return false;
   const mins = v => { const [h, m] = v.split(':').map(Number);
