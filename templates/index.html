@@ -1947,22 +1947,44 @@ async function refreshRouteEstimate() {
     return;
   }
   if (key === routeCalc.key) { applyEndTimeEstimate(); return; }
+
+  // Keeping the previous route's measurement would leave the field showing an
+  // arrival time, and the hint a driving time, for a route no longer on screen —
+  // stated with the same confidence as a correct one. The estimate is dropped
+  // and the reason given, so the end time going blank is explained rather than
+  // looking like a glitch.
+  const giveUp = (why) => {
+    const endEl = document.getElementById('tripEndTime');
+    // A time the user typed is theirs, so no estimate was going to be used and
+    // the failure is not worth reporting.
+    const userOwns = endEl.value && !endEl._derived;
+    routeCalc = { key: null, miles: null, durationSeconds: null };
+    applyEndTimeEstimate();
+    if (!userOwns) document.getElementById('endTimeHint').textContent = why;
+  };
+
   try {
     const resp = await fetch('/calculate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(route),
     });
-    const data = await resp.json();
-    if (!resp.ok) return;
-    // Another edit may have landed while this was in flight; that edit started
-    // its own request, and this answer describes a route that is no longer on
-    // screen, so it must not become the estimate.
+    const data = await resp.json().catch(() => ({}));
+    // Checked before the staleness test below: a response for the route still on
+    // screen is the one whose failure the user needs to hear about.
     if (routeKey(tripRoute.allRows()) !== key) return;
+    if (!resp.ok) {
+      giveUp(data.error || 'Could not measure this route, so there is no estimated end time.');
+      return;
+    }
     rememberBiasCenter(data.endpoints);
     routeCalc = { key, miles: data.distance_miles, durationSeconds: data.duration_seconds };
     applyEndTimeEstimate();
-  } catch { /* leave the previous estimate alone */ }
+  } catch {
+    if (routeKey(tripRoute.allRows()) === key) {
+      giveUp('Could not reach the server to estimate the end time.');
+    }
+  }
 }
 
 // Debounced, because a location changes on every keystroke and each distinct
@@ -1984,7 +2006,17 @@ function scheduleRouteEstimate() {
 // to the field. Clearing it again hands the field back.
 ['input', 'change'].forEach(ev =>
   document.getElementById('tripEndTime').addEventListener(ev, e => {
-    if (!e.target.value) { estimatedEndValue = null; e.target._derived = false; applyEndTimeEstimate(); return; }
+    if (!e.target.value) {
+      estimatedEndValue = null;
+      e.target._derived = false;
+      applyEndTimeEstimate();
+      // Also a retry: a route whose measurement failed cleared routeCalc, so
+      // there is nothing for applyEndTimeEstimate to use and the route itself
+      // has not changed to trigger another attempt. Handing the field back is
+      // the user asking for an estimate, so ask again.
+      if (routeCalc.durationSeconds == null) scheduleRouteEstimate();
+      return;
+    }
     // Unchanged from what the estimate wrote: this is the second event of the
     // same keystroke, not the user replacing it.
     if (e.target.value === estimatedEndValue) return;
