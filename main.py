@@ -33,11 +33,10 @@ MAX_PHOTO_BYTES = 2 * 1024 * 1024  # 2MB
 MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024  # 5MB
 MAX_ATTACHMENTS_PER_TRIP = 10
 MAX_FILENAME_LENGTH = 120
-# Reject oversized request bodies at the Werkzeug layer before they're ever
-# buffered into memory, rather than only checking size after a full read().
-# +64KB covers multipart boundary/header overhead around the raw file bytes.
-# The largest upload any route accepts, since this cap is global. +64KB covers
-# multipart boundary/header overhead around the raw file bytes.
+# Rejected at the Werkzeug layer before the body is ever buffered into memory,
+# rather than checked after a full read(). This cap is global, so it has to be
+# the largest upload any route accepts; +64KB covers multipart boundary and
+# header overhead around the raw file bytes.
 app.config['MAX_CONTENT_LENGTH'] = max(MAX_PHOTO_BYTES, MAX_ATTACHMENT_BYTES) + 64 * 1024
 
 # Use PostgreSQL (via pg8000, pure-Python driver) when DATABASE_URL is set; SQLite locally.
@@ -1099,15 +1098,26 @@ def _owned_attachment(att_id, with_data=True):
             .first())
 
 
+# Characters that reorder the text around them without being visible. Left in a
+# filename, U+202E turns "harmless\u202Egpj.exe" into something that reads as
+# "harmlessexe.jpg" wherever it is displayed, which is the whole point of using
+# one in a filename. Stripped rather than escaped, since no legitimate name needs
+# them. Includes the bidi overrides and embeddings and the isolate controls.
+_BIDI_CONTROLS = re.compile(r'[\u200e\u200f\u202a-\u202e\u2066-\u2069]')
+
+
 def _clean_filename(name):
-    """A display-safe filename: no path, no control characters, length-capped.
+    """A display-safe filename: no path, no control or bidi characters,
+    length-capped.
 
     The name is only ever shown and sent in a Content-Disposition header, never
     used to open a file, but a name carrying a path or a newline could still
-    mislead the user or split the header.
+    split the header, and one carrying a bidi override could misrepresent what
+    the file is.
     """
     name = (name or '').replace('\\', '/').split('/')[-1]
-    name = re.sub(r'[\x00-\x1f\x7f"]', '', name).strip()
+    name = re.sub(r'[\x00-\x1f\x7f"]', '', name)
+    name = _BIDI_CONTROLS.sub('', name).strip()
     if len(name) > MAX_FILENAME_LENGTH:
         stem, dot, ext = name.rpartition('.')
         name = (stem[:MAX_FILENAME_LENGTH - len(ext) - 1] + dot + ext) if dot else name[:MAX_FILENAME_LENGTH]
