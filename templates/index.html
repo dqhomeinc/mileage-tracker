@@ -457,6 +457,9 @@
     .trip-actions { padding-top: 1px; }
 
     /* ── Edit modal extras ───────────────────── */
+    /* Sits inline beside the mileage box rather than under a field, so it does
+       not take the vehicle hint's top margin. */
+    .measure-error { margin-top: 0; }
     .modal-field select {
       width: 100%; padding: 11px 14px;
       border: 1.5px solid var(--border); border-radius: var(--radius-sm);
@@ -651,7 +654,7 @@
     <div style="font-size:.73rem;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px">Distance</div>
     <div class="modal-dist-row">
       <div class="modal-miles-box"><span id="editMiles">—</span> miles</div>
-      <span class="vehicle-hint" id="editMeasureError" style="margin-top:0"></span>
+      <span class="vehicle-hint measure-error" id="editMeasureError"></span>
       <button class="btn-recalc" id="recalcBtn" onclick="recalcEditDistance()">
         <i class="fas fa-route"></i> Recalculate
       </button>
@@ -2462,7 +2465,26 @@ document.getElementById('editAttachInput').addEventListener('change', async (e) 
 // costs nothing. Routes bills per request, so that key is what keeps a live
 // readout from being expensive.
 function newMeasureState() {
-  return { key: null, miles: null, durationSeconds: null, timer: null, inFlight: null };
+  return { key: null, miles: null, durationSeconds: null, timer: null, inFlight: null,
+           // Bumped by resetMeasure(). A request captures it when it starts and
+           // compares it when it returns, so an answer from before a reset is
+           // discarded rather than rendered. A boolean cannot do this job: the
+           // reset has to clear the state the request would write into, which
+           // would clear the flag with it.
+           generation: 0 };
+}
+
+// Forgets a measurement and invalidates any request still on its way back.
+// Fields are cleared individually rather than by assigning a fresh object, so
+// the generation survives to be compared against.
+function resetMeasure(state) {
+  clearTimeout(state.timer);
+  state.generation += 1;
+  state.key = null;
+  state.miles = null;
+  state.durationSeconds = null;
+  state.timer = null;
+  state.inFlight = null;
 }
 
 function formatDriveTime(seconds) {
@@ -2487,6 +2509,8 @@ async function measureRoute(state, editor, onChange) {
   if (key === state.key) { onChange('ready'); return state; }
 
   onChange('measuring');
+  // Captured before the request so a reset arriving during it can be detected.
+  const generation = state.generation;
   // Tracked so a save can wait for a measurement already running instead of
   // starting a second one for the same route.
   const request = (async () => {
@@ -2506,6 +2530,11 @@ async function measureRoute(state, editor, onChange) {
   const result = await request;
   if (state.inFlight === request) state.inFlight = null;
 
+  // The state was reset while this was in flight — the modal closed, or a trip
+  // was logged — so there is nothing to render into. Writing now would put a
+  // number into a closed modal, or into the next trip opened in it.
+  if (state.generation !== generation) return state;
+
   // An edit landed while this was in flight. That edit started its own
   // measurement, and this answer is for a route no longer on screen.
   if (routeKey(editor.allRows()) !== key) return state;
@@ -2524,9 +2553,16 @@ async function measureRoute(state, editor, onChange) {
 
 function scheduleMeasure(state, editor, onChange) {
   clearTimeout(state.timer);
-  // Said immediately, so a changed route never shows a stale number as though
-  // it still applied.
-  if (state.key && routeKey(editor.allRows()) !== state.key) onChange('stale');
+  // Said immediately, so a changed route never shows a stale number, or a stale
+  // error, as though it still applied.
+  //
+  // An incomplete route is reported as such rather than as changed: a form with
+  // a blank row has nothing to remeasure, and a failed measurement leaves the
+  // key null, so comparing keys alone announced "remeasuring" on an empty form
+  // and left a previous failure on screen on an edited one. Which of the two it
+  // is decides which the user is told.
+  if (!routeFromLocations(editor.allRows())) onChange('incomplete');
+  else if (routeKey(editor.allRows()) !== state.key) onChange('stale');
   state.timer = setTimeout(() => measureRoute(state, editor, onChange), MEASURE_DEBOUNCE_MS);
 }
 
@@ -2590,6 +2626,10 @@ function renderEditMeasure(status, detail) {
   } else if (status === 'failed') {
     box.textContent = '—';
     document.getElementById('editMeasureError').textContent = detail || 'Could not measure this route.';
+  } else {
+    // 'incomplete': a row was cleared, so there is no route to measure. Without
+    // this the modal kept whichever ellipsis or error preceded it, for ever.
+    box.textContent = '—';
   }
   if (status !== 'failed') document.getElementById('editMeasureError').textContent = '';
 }
@@ -2625,16 +2665,18 @@ document.getElementById('logTripBtn').addEventListener('click', async () => {
 
   const btn = document.getElementById('logTripBtn');
   btn.disabled = true;
-  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span> Logging…';
 
   // Measured while the route was built, so this is usually already known. It
   // still waits, because logging can land inside the debounce window, and /log
   // reuses a distance it is given instead of measuring the same route again.
-  const btnLabel = document.getElementById('logTripBtn').innerHTML;
-  document.getElementById('logTripBtn').innerHTML =
-    '<span class="spinner-border spinner-border-sm me-1"></span> Measuring…';
+  //
+  // The button says what it is doing in order: measuring, then logging. The
+  // "Logging…" label used to be set first and then captured as the label to
+  // restore, so the button said "Logging…" during the measurement and again
+  // after it.
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span> Measuring…';
   await currentMeasurement(tripMeasure, tripRoute, renderTripMeasure);
-  document.getElementById('logTripBtn').innerHTML = btnLabel;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span> Logging…';
 
   // Sent with the trip when it describes this exact route: /log reuses a
   // distance it is given rather than asking Routes again, so neither the live
@@ -2680,8 +2722,7 @@ document.getElementById('logTripBtn').addEventListener('click', async () => {
     tripRoute.reset();
     // The next trip is a different route, so the measurement and the estimate
     // it fed both go with it.
-    clearTimeout(tripMeasure.timer);
-    Object.assign(tripMeasure, newMeasureState());
+    resetMeasure(tripMeasure);
     renderTripMeasure('incomplete');
     document.getElementById('endTimeHint').textContent = '';
     refreshPlaceWarnings();
@@ -2983,9 +3024,12 @@ function openEditModal(id) {
   document.getElementById('editAttachHint').textContent = '';
   // Seeded from what the trip was last measured as, so the modal opens showing
   // a number rather than a dash; it is only remeasured if the route changes.
-  Object.assign(editMeasure, { key: editingTrip.calcRouteKey, miles: editingTrip.miles,
-                               durationSeconds: editingTrip.durationSeconds,
-                               timer: null, inFlight: null });
+  // Cleared first: building the rows above already scheduled a measurement, and
+  // overwriting timer with null would leave that one running unreferenced.
+  resetMeasure(editMeasure);
+  editMeasure.key = editingTrip.calcRouteKey;
+  editMeasure.miles = editingTrip.miles;
+  editMeasure.durationSeconds = editingTrip.durationSeconds;
   document.getElementById('editMeasureError').textContent = '';
 
   document.getElementById('editModal').classList.add('open');
@@ -2996,10 +3040,11 @@ function closeEditModal() {
   editingTrip = null;
   document.getElementById('editAttachList').innerHTML = '';
   document.getElementById('editAttachHint').textContent = '';
-  // A debounced remeasure would otherwise land after the modal is gone and
-  // write a number into it, or into the next trip opened.
-  clearTimeout(editMeasure.timer);
-  Object.assign(editMeasure, newMeasureState());
+  // A pending or in-flight remeasure would otherwise land after the modal is
+  // gone and write a number into it, or into the next trip opened. The timer is
+  // cancellable; a request already sent is not, so the generation bump makes
+  // measureRoute discard its answer instead of rendering it.
+  resetMeasure(editMeasure);
   updateSpeedWarning('editSpeedWarning', 'editSpeedWarningText', null);
   updateSpeedWarning('editPlaceWarning', 'editPlaceWarningText', null);
 }
@@ -3009,21 +3054,17 @@ document.getElementById('editModal').addEventListener('click', (e) => {
 });
 
 
-// Calls /calculate for the modal's current route and, on success, updates
-// editingTrip's miles/duration (and the route they're now current for) in
-// place. Returns whether it succeeded; never throws.
-// Measures the modal's route now, waiting for a debounced or in-flight one
-// rather than starting a competing request. renderEditMeasure writes the result
-// into editingTrip, so there is one path by which the modal's distance changes.
-// Measures the modal's route now, waiting for a debounced or in-flight one
-// rather than starting a competing request. Returns why it did not succeed, or
-// null for success, which the caller turns into a message.
+// Measures the modal's route now, waiting for a debounced or in-flight
+// measurement rather than starting a competing one. renderEditMeasure writes
+// the answer into editingTrip, so there is one path by which the modal's
+// distance changes. Never throws; returns null on success, or a reason the
+// caller turns into a message.
 //
-// Success means the measurement describes the route that is on screen *now*.
-// measureRoute leaves its state untouched when an edit lands mid-request — the
-// answer it got is for a route nobody is looking at any more — so a non-null
-// miles on its own would read as success while still holding the older route's
-// distance, which is exactly what a save must not store.
+// Success means the measurement describes the route on screen *now*.
+// measureRoute leaves its state untouched when an edit lands mid-request — that
+// answer is for a route nobody is looking at any more — so a non-null mileage
+// alone would read as success while holding the older route's distance, which
+// is exactly what a save must not store.
 async function fetchEditDistance() {
   await currentMeasurement(editMeasure, editRoute, renderEditMeasure);
   if (editMeasure.miles == null) return 'could-not-measure';
