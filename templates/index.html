@@ -3074,10 +3074,17 @@ async function fetchEditDistance() {
 
 async function recalcEditDistance() {
   if (!routePayload(editRoute)) return;
-  // Pressed deliberately, so the cached answer for an unchanged route is
-  // discarded rather than returned — otherwise the button would do nothing
-  // after a failed measurement or a transient network problem.
-  editMeasure.key = null;
+  // Pressed deliberately, so everything already known is discarded and a fresh
+  // request is made — otherwise the button would do nothing after a failed
+  // measurement or a transient network problem.
+  //
+  // The whole state goes, not just the key: currentMeasurement waits for a
+  // request already in flight, and that request sets the key on its way back,
+  // so clearing the key alone left the button returning the answer it was
+  // about to receive instead of asking again. resetMeasure also bumps the
+  // generation, which makes that in-flight answer be discarded rather than
+  // rendered over this one.
+  resetMeasure(editMeasure);
   const btn = document.getElementById('recalcBtn');
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Calculating…';
@@ -3117,6 +3124,11 @@ async function saveEdit() {
     btn.disabled = true;
     btn.textContent = 'Recalculating…';
     const problem = await fetchEditDistance();
+    // The modal can be closed while that was measuring, which resets the state
+    // and leaves nothing to save. Without this the reset reads as a failed
+    // measurement and the user is told the distance could not be worked out,
+    // about a trip they have already dismissed.
+    if (!editingTrip) return;
     btn.disabled = false;
     btn.textContent = 'Save Changes';
     if (problem === 'changed-while-measuring') {
