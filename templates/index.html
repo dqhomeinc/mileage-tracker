@@ -3415,23 +3415,74 @@ function thumbBox(width, height) {
   return { w: width * scale, h: height * scale };
 }
 
+// Roughly print resolution for the size the thumbnail is drawn at, so the
+// re-encode shrinks a 4MB phone photo to a few tens of KB instead of embedding
+// it whole for a 34mm box.
+const THUMB_DPI = 200;
+
+// Every thumbnail is re-encoded to JPEG through a canvas, which is the only
+// reason the PDF can draw them at all: jsPDF decodes an image with the
+// processor for the format it is *told*, and an attachment may be PNG, WebP or
+// GIF. A PNG handed over as 'JPEG' throws ("Error while decompressing the
+// data"), and WebP it cannot read in any format. Going through a canvas makes
+// every thumbnail one format that jsPDF definitely handles, at the pixel size
+// actually needed.
 async function loadThumb(file) {
   if (!file.blob || !file.previewable) return null;
   try {
     const dataUrl = await blobToDataUrl(file.blob);
-    const size = await new Promise((resolve, reject) => {
-      const img = new Image();
-      img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight });
-      img.onerror = () => reject(new Error('not decodable'));
-      img.src = dataUrl;
+    const img = await new Promise((resolve, reject) => {
+      const el = new Image();
+      el.onload = () => resolve(el);
+      el.onerror = () => reject(new Error('not decodable'));
+      el.src = dataUrl;
     });
-    return { dataUrl, ...thumbBox(size.width, size.height) };
+    const box = thumbBox(img.naturalWidth, img.naturalHeight);
+    const scale = THUMB_DPI / 25.4;
+    const canvas = document.createElement('canvas');
+    canvas.width  = Math.max(1, Math.round(box.w * scale));
+    canvas.height = Math.max(1, Math.round(box.h * scale));
+    const ctx = canvas.getContext('2d');
+    // JPEG has no transparency, so a PNG or GIF with an alpha channel would
+    // come out on black without this.
+    ctx.fillStyle = '#FFFFFF';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    return { dataUrl: canvas.toDataURL('image/jpeg', 0.82), ...box };
   } catch (err) {
     // A file whose bytes passed the server's sniffing can still fail to decode
-    // here; it stays in the zip and is listed, just without a thumbnail.
+    // here, and a browser without canvas support lands here too. It stays in
+    // the zip and is listed, just without a thumbnail.
     console.warn('[export] could not render', file.filename, err);
     return null;
   }
+}
+
+const PAGE_MARGIN = 14;
+const THUMB_GAP = 4;
+const THUMB_CAPTION_H = 3.5;
+const NAMED_LINE_H = 5;
+const ENTRY_HEADER_H = 9;
+
+// Thumbnails packed into rows that stop at the right margin, with the height
+// each row needs. Measured before anything is drawn, because the page-break
+// decision needs to know how tall the whole block is: laying out while drawing
+// is what let thumbnails run off the page and text land on top of them.
+function layOutThumbs(files, usableWidth) {
+  const rows = [];
+  let row = { files: [], width: 0, height: 0 };
+  for (const file of files) {
+    const needed = file.thumb.w + (row.files.length ? THUMB_GAP : 0);
+    if (row.files.length && row.width + needed > usableWidth) {
+      rows.push(row);
+      row = { files: [], width: 0, height: 0 };
+    }
+    row.width += file.thumb.w + (row.files.length ? THUMB_GAP : 0);
+    row.height = Math.max(row.height, file.thumb.h);
+    row.files.push(file);
+  }
+  if (row.files.length) rows.push(row);
+  return rows;
 }
 
 function appendReceiptSection(doc, receipts) {
@@ -3439,43 +3490,68 @@ function appendReceiptSection(doc, receipts) {
   doc.addPage();
   doc.setFontSize(13);
   doc.setTextColor(30, 41, 59);
-  doc.text('Receipts & documents', 14, 20);
+  doc.text('Receipts & documents', PAGE_MARGIN, 20);
   doc.setFontSize(9);
   doc.setTextColor(100, 116, 139);
-  doc.text('Originals are in the attachments folder of this ZIP, one folder per trip.', 14, 26);
+  doc.text('Originals are in the attachments folder of this ZIP, one folder per trip.',
+           PAGE_MARGIN, 26);
 
+  const pageBottom = doc.internal.pageSize.getHeight() - PAGE_MARGIN;
+  const usableWidth = doc.internal.pageSize.getWidth() - PAGE_MARGIN * 2;
   let y = 36;
-  const pageBottom = doc.internal.pageSize.getHeight() - 14;
+
   for (const entry of receipts) {
-    const tallest = entry.files.reduce((h, f) => Math.max(h, f.thumb ? f.thumb.h : 0), 0);
-    const blockHeight = 12 + tallest + 6;
-    if (y + blockHeight > pageBottom) { doc.addPage(); y = 20; }
+    // Split by what can actually be drawn. A file whose thumbnail failed to
+    // load is listed by name like a PDF or a HEIC — the two are the same case
+    // as far as this layout is concerned.
+    const drawable = entry.files.filter(f => f.thumb);
+    const named    = entry.files.filter(f => !f.thumb);
+    const rows = layOutThumbs(drawable, usableWidth);
+
+    const thumbsHeight = rows.reduce((h, r) => h + r.height + THUMB_CAPTION_H + THUMB_GAP, 0);
+    const blockHeight = ENTRY_HEADER_H + thumbsHeight + named.length * NAMED_LINE_H + 6;
+    // A trip with many receipts can be taller than a page on its own, so it
+    // only moves to a fresh page when that would actually help.
+    if (y > 36 && y + blockHeight > pageBottom) { doc.addPage(); y = 20; }
 
     doc.setFontSize(9.5);
     doc.setTextColor(30, 41, 59);
-    doc.text(tripLabel(entry.trip), 14, y);
+    doc.text(tripLabel(entry.trip), PAGE_MARGIN, y);
     doc.setFontSize(8);
     doc.setTextColor(100, 116, 139);
-    doc.text(`attachments/${entry.folder}/`, 14, y + 5);
+    doc.text(`attachments/${entry.folder}/`, PAGE_MARGIN, y + 5);
+    y += ENTRY_HEADER_H;
 
-    let x = 14;
-    let rowTop = y + 9;
-    for (const file of entry.files) {
-      if (file.thumb) {
-        doc.addImage(file.thumb.dataUrl, 'JPEG', x, rowTop, file.thumb.w, file.thumb.h);
-        doc.setFontSize(6.5);
-        doc.setTextColor(100, 116, 139);
-        doc.text(file.name.slice(0, 26), x, rowTop + file.thumb.h + 3);
-        x += file.thumb.w + 4;
-      } else {
-        // HEIC, PDFs and anything that would not decode: named, not drawn.
-        doc.setFontSize(8);
-        doc.setTextColor(71, 85, 105);
-        doc.text(`• ${file.name}${file.blob ? '' : '  (could not be read)'}`, x, rowTop + 4);
-        rowTop += 5;
+    for (const row of rows) {
+      if (y + row.height + THUMB_CAPTION_H > pageBottom) { doc.addPage(); y = 20; }
+      let x = PAGE_MARGIN;
+      for (const file of row.files) {
+        try {
+          doc.addImage(file.thumb.dataUrl, 'JPEG', x, y, file.thumb.w, file.thumb.h);
+          doc.setFontSize(6.5);
+          doc.setTextColor(100, 116, 139);
+          doc.text(file.name.slice(0, 26), x, y + file.thumb.h + THUMB_CAPTION_H);
+          x += file.thumb.w + THUMB_GAP;
+        } catch (err) {
+          // One image jsPDF will not take must not cost the whole export: the
+          // file is still in the zip, so it falls back to being named.
+          console.warn('[export] could not draw', file.name, err);
+          named.push(file);
+        }
       }
+      y += row.height + THUMB_CAPTION_H + THUMB_GAP;
     }
-    y += blockHeight + (entry.files.some(f => !f.thumb) ? 4 : 0);
+
+    // Below the thumbnails rather than beside them, each on its own line, so
+    // nothing is drawn over anything else.
+    for (const file of named) {
+      if (y + NAMED_LINE_H > pageBottom) { doc.addPage(); y = 20; }
+      doc.setFontSize(8);
+      doc.setTextColor(71, 85, 105);
+      doc.text(`• ${file.name}${file.blob ? '' : '  (could not be read)'}`, PAGE_MARGIN, y + 4);
+      y += NAMED_LINE_H;
+    }
+    y += 6;
   }
 }
 
