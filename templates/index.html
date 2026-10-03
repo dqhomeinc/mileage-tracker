@@ -3408,10 +3408,18 @@ function blobToDataUrl(blob) {
   });
 }
 
-// Drawn at its natural aspect ratio inside a square box, so a tall receipt is
-// not stretched into a wide one.
+// The largest box of the image's own proportions that fits the thumbnail
+// square, so a tall receipt is not stretched into a wide one.
+//
+// It always fills the square, including for an image smaller than the box. A
+// previous `Math.min(..., 1)` meant to stop upscaling, but the two sides of
+// that comparison are pixels and millimetres: it left anything under 34px
+// drawn at one millimetre per pixel, so an 8x8px image came out 8mm across.
+// Nothing a camera produces is that small, but filling the box is both
+// unit-honest and what a grid of thumbnails wants — a little blockiness in a
+// 34mm preview costs less than an invisible one.
 function thumbBox(width, height) {
-  const scale = Math.min(RECEIPT_THUMB_MM / width, RECEIPT_THUMB_MM / height, 1);
+  const scale = Math.min(RECEIPT_THUMB_MM / width, RECEIPT_THUMB_MM / height);
   return { w: width * scale, h: height * scale };
 }
 
