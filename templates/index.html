@@ -621,9 +621,9 @@
         <button class="export-btn" onclick="exportCSV()" title="Export as CSV">
           <i class="fas fa-file-csv"></i><span class="export-label"> CSV</span>
         </button>
-        <button class="export-btn d-none" id="exportZipBtn" onclick="exportZip()"
-                title="Export the log with its receipts as a ZIP">
-          <i class="fas fa-file-zipper"></i><span class="export-label"> PDF + files</span>
+        <button class="export-btn d-none" id="exportFullBtn" onclick="exportSinglePdf()"
+                title="Export one PDF holding the log and a download link for every receipt">
+          <i class="fas fa-file-pdf"></i><span class="export-label"> PDF + receipts</span>
         </button>
       </div>
     </div>
@@ -2925,9 +2925,9 @@ function updateTotalDisplay() {
     document.getElementById('statTripCount').textContent = tripCount;
     bar.classList.remove('d-none');
     btns.classList.remove('d-none');
-    // Only worth offering when there is something to bundle; otherwise the ZIP
-    // would just be a PDF in a wrapper.
-    document.getElementById('exportZipBtn').classList
+    // Only worth offering when there is something to link to; otherwise it
+    // would produce exactly what the PDF button already does.
+    document.getElementById('exportFullBtn').classList
       .toggle('d-none', !tripsData.some(t => (t.attachments || []).length));
   } else {
     bar.classList.add('d-none');
@@ -3394,9 +3394,10 @@ const PDF_TRIP_COLUMN_STYLES = {
   7: { cellWidth: 46, overflow: 'linebreak' },  // Notes
 };
 
-// receipts/returnDoc are passed only by the ZIP export, which needs the same
-// log plus a receipts section and wants the document rather than a download.
-function exportPDF(receipts = null, returnDoc = false) {
+// receipts/returnDoc/links/expiresAt are passed only by the receipts export,
+// which needs the same log plus a receipts section and wants the document back
+// rather than a download.
+function exportPDF(receipts = null, returnDoc = false, links = {}, expiresAt = null) {
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF({ orientation: 'landscape' });
   const yearGroups = groupTripsByYear(tripsData);
@@ -3518,39 +3519,33 @@ function exportPDF(receipts = null, returnDoc = false) {
     });
   });
 
-  if (receipts) appendReceiptSection(doc, receipts);
+  if (receipts) appendReceiptSection(doc, receipts, links, expiresAt);
 
   if (returnDoc) return doc;
   doc.save('mileage-log.pdf');
 }
 
-// ─── Log with receipts (ZIP) ──────────────────────────────────────────────
+// ─── Log with receipts (one PDF) ──────────────────────────────────────────
 // The trip table already spends 268 of the 269mm usable across a landscape A4
 // page, so there is no column free for receipts. They go in a section of their
 // own after the log instead, which also gives a thumbnail room to be legible.
+//
+// It is one file on purpose. The earlier shape was a ZIP holding the log, the
+// original files in per-trip folders, and an index.html whose only job was to
+// link to them, because a PDF cannot be relied on to open a *sibling* file --
+// Acrobat follows a relative link, the Chrome and Firefox viewers refuse, and
+// phone viewers ignore it, all silently. A link to a URL is a different thing
+// entirely: every viewer on every platform opens those. So each thumbnail and
+// each filename is now a signed link back to the app, and the HTML and the
+// folders are gone.
+//
+// What that costs: the links need the app reachable, and they stop working
+// after the window the server signed them for. The thumbnail in the PDF is
+// readable either way.
 const RECEIPT_THUMB_MM = 34;
 
-// One folder per trip, named so it sorts by date and reads without opening it.
-function tripFolderName(trip, taken) {
-  const date = trip.trip_date || 'undated';
-  // The leading part of each location, before its state and country, taken from
-  // each end separately — splitting the joined string instead would cut it at
-  // the first comma and lose the destination entirely.
-  const place = v => (v || '').split(',')[0];
-  const where = `${place(trip.start)}-to-${place(trip.end)}`
-    .replace(/[^A-Za-z0-9]+/g, '-')
-    .replace(/^-|-$/g, '')
-    .slice(0, 48) || 'trip';
-  let name = `${date}_${where}`;
-  // Two trips can share a date and a route, and a zip cannot hold two folders
-  // of the same name without one silently replacing the other.
-  let n = 2;
-  while (taken.has(name)) name = `${date}_${where}-${n++}`;
-  taken.add(name);
-  return name;
-}
-
-// A filename unique within its trip's folder, for the same reason.
+// A filename unique within its trip, so two receipts uploaded under the same
+// name are still told apart in the listing.
 function uniqueFileName(filename, taken) {
   if (!taken.has(filename)) { taken.add(filename); return filename; }
   const dot = filename.lastIndexOf('.');
@@ -3567,35 +3562,74 @@ function tripLabel(trip) {
   return `${when} · ${trip.start || '?'} → ${trip.end || '?'}`;
 }
 
-// Downloads every attachment once. Returns the trips that have any, each with
-// its folder name and its files as blobs, so the PDF, the index and the zip all
-// describe the same bytes rather than fetching them three times.
+// Downloads every attachment once, for the thumbnails. Returns the trips that
+// have any, each with its files as blobs.
 async function collectReceipts(trips, onProgress) {
-  const folders = new Set();
   const out = [];
   const withFiles = trips.filter(t => (t.attachments || []).length);
   let done = 0;
   const total = withFiles.reduce((n, t) => n + t.attachments.length, 0);
   for (const trip of withFiles) {
     const names = new Set();
-    const entry = { trip, folder: tripFolderName(trip, folders), files: [] };
+    const entry = { trip, files: [] };
     for (const att of trip.attachments) {
+      const file = { ...att, name: uniqueFileName(att.filename, names), blob: null };
       try {
         const resp = await fetch(`/attachment/${att.id}`);
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        entry.files.push({ ...att, name: uniqueFileName(att.filename, names), blob: await resp.blob() });
+        file.blob = await resp.blob();
       } catch (err) {
         // One unreadable file should not cost the whole export; it is recorded
-        // so the index and the PDF can say it is missing rather than imply the
-        // trip had nothing attached.
+        // so the listing can say it is missing rather than imply the trip had
+        // nothing attached.
         console.warn('[export]', att.filename, err);
-        entry.files.push({ ...att, name: uniqueFileName(att.filename, names), blob: null });
       }
+      entry.files.push(file);
       onProgress?.(++done, total);
     }
     out.push(entry);
   }
   return out;
+}
+
+// The server refuses a request for more links than this rather than truncating
+// it, so a log with more receipts than one request allows is asked for in
+// several. Kept in step with MAX_LINKS_PER_REQUEST in main.py; asking for more
+// than the server allows would lose every link in that batch.
+const LINK_BATCH_SIZE = 500;
+
+// Signed, time-limited links for exactly the attachments being exported. Asked
+// for after the files are collected, in as few requests as the cap allows, so a
+// failure is one failure rather than one per receipt. Returns whatever came
+// back: the PDF is still worth having with thumbnails and no links, and a log
+// big enough to need two batches should not lose the first because the second
+// failed.
+async function fetchAttachmentLinks(receipts) {
+  const ids = receipts.flatMap(e => e.files.map(f => f.id)).filter(id => id != null);
+  if (!ids.length) return { links: {}, expiresAt: null };
+
+  const links = {};
+  let expiresAt = null;
+  for (let i = 0; i < ids.length; i += LINK_BATCH_SIZE) {
+    try {
+      const resp = await fetch('/attachments/links', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: ids.slice(i, i + LINK_BATCH_SIZE) }),
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = await resp.json();
+      Object.assign(links, data.links || {});
+      // Every batch is signed at nearly the same moment, so the first answer's
+      // window is the one the PDF can honestly state.
+      if (expiresAt === null && data.expires_in) {
+        expiresAt = new Date(Date.now() + data.expires_in * 1000);
+      }
+    } catch (err) {
+      console.warn('[export] could not get download links', err);
+    }
+  }
+  return { links, expiresAt };
 }
 
 function blobToDataUrl(blob) {
@@ -3658,8 +3692,9 @@ async function loadThumb(file) {
     return { dataUrl: canvas.toDataURL('image/jpeg', 0.82), ...box };
   } catch (err) {
     // A file whose bytes passed the server's sniffing can still fail to decode
-    // here, and a browser without canvas support lands here too. It stays in
-    // the zip and is listed, just without a thumbnail.
+    // here — HEIC in anything but Safari is the usual case — and a browser
+    // without canvas support lands here too. It is listed by name instead,
+    // with the same download link.
     console.warn('[export] could not render', file.filename, err);
     return null;
   }
@@ -3692,16 +3727,22 @@ function layOutThumbs(files, usableWidth) {
   return rows;
 }
 
-function appendReceiptSection(doc, receipts) {
+function appendReceiptSection(doc, receipts, links, expiresAt) {
   if (!receipts.length) return;
+  const linkFor = file => links[String(file.id)] || null;
+
   doc.addPage();
   doc.setFontSize(13);
   doc.setTextColor(30, 41, 59);
   doc.text('Receipts & documents', PAGE_MARGIN, 20);
   doc.setFontSize(9);
   doc.setTextColor(100, 116, 139);
-  doc.text('Originals are in the attachments folder of this ZIP, one folder per trip.',
-           PAGE_MARGIN, 26);
+  const anyLink = receipts.some(e => e.files.some(linkFor));
+  doc.text(anyLink
+    ? `Click a thumbnail or a filename to download the original.${
+        expiresAt ? ` These links work until ${expiresAt.toLocaleDateString()}.` : ''}`
+    : 'Download links could not be prepared — the originals are in the app.',
+    PAGE_MARGIN, 26);
 
   const pageBottom = doc.internal.pageSize.getHeight() - PAGE_MARGIN;
   const usableWidth = doc.internal.pageSize.getWidth() - PAGE_MARGIN * 2;
@@ -3710,7 +3751,7 @@ function appendReceiptSection(doc, receipts) {
   for (const entry of receipts) {
     // Split by what can actually be drawn. A file whose thumbnail failed to
     // load is listed by name like a PDF or a HEIC — the two are the same case
-    // as far as this layout is concerned.
+    // as far as this layout is concerned, and both still get their link.
     const drawable = entry.files.filter(f => f.thumb);
     const named    = entry.files.filter(f => !f.thumb);
     const rows = layOutThumbs(drawable, usableWidth);
@@ -3726,7 +3767,7 @@ function appendReceiptSection(doc, receipts) {
     doc.text(tripLabel(entry.trip), PAGE_MARGIN, y);
     doc.setFontSize(8);
     doc.setTextColor(100, 116, 139);
-    doc.text(`attachments/${entry.folder}/`, PAGE_MARGIN, y + 5);
+    doc.text(entry.files.length === 1 ? '1 file' : `${entry.files.length} files`, PAGE_MARGIN, y + 5);
     y += ENTRY_HEADER_H;
 
     for (const row of rows) {
@@ -3735,13 +3776,25 @@ function appendReceiptSection(doc, receipts) {
       for (const file of row.files) {
         try {
           doc.addImage(file.thumb.dataUrl, 'JPEG', x, y, file.thumb.w, file.thumb.h);
+          const url = linkFor(file);
           doc.setFontSize(6.5);
-          doc.setTextColor(100, 116, 139);
-          doc.text(file.name.slice(0, 26), x, y + file.thumb.h + THUMB_CAPTION_H);
+          // Blue only where there is something to click, so the colour is not
+          // promising a link that is not there.
+          doc.setTextColor(...(url ? [79, 70, 229] : [100, 116, 139]));
+          const caption = file.name.slice(0, 26);
+          const captionY = y + file.thumb.h + THUMB_CAPTION_H;
+          if (url) {
+            doc.textWithLink(caption, x, captionY, { url });
+            // The whole thumbnail is the hit area too: on a phone a 3mm line of
+            // 6.5pt text is not something anyone can tap.
+            doc.link(x, y, file.thumb.w, file.thumb.h, { url });
+          } else {
+            doc.text(caption, x, captionY);
+          }
           x += file.thumb.w + THUMB_GAP;
         } catch (err) {
-          // One image jsPDF will not take must not cost the whole export: the
-          // file is still in the zip, so it falls back to being named.
+          // One image jsPDF will not take must not cost the whole export: it
+          // falls back to being named below, link and all.
           console.warn('[export] could not draw', file.name, err);
           named.push(file);
         }
@@ -3754,61 +3807,23 @@ function appendReceiptSection(doc, receipts) {
     for (const file of named) {
       if (y + NAMED_LINE_H > pageBottom) { doc.addPage(); y = 20; }
       doc.setFontSize(8);
-      doc.setTextColor(71, 85, 105);
-      doc.text(`• ${file.name}${file.blob ? '' : '  (could not be read)'}`, PAGE_MARGIN, y + 4);
+      const url = linkFor(file);
+      const label = `• ${file.name}${file.blob ? '' : '  (could not be read)'}`;
+      if (url && file.blob) {
+        doc.setTextColor(79, 70, 229);
+        doc.textWithLink(label, PAGE_MARGIN, y + 4, { url });
+      } else {
+        doc.setTextColor(71, 85, 105);
+        doc.text(label, PAGE_MARGIN, y + 4);
+      }
       y += NAMED_LINE_H;
     }
     y += 6;
   }
 }
 
-// A plain page of links. This exists because a PDF cannot be relied on to open
-// a sibling file: Acrobat follows a relative link, Chrome's and Firefox's
-// built-in viewers refuse, and phone viewers ignore it — all without saying so.
-// A browser opening this file follows the same links without complaint.
-function buildReceiptIndex(receipts, trips) {
-  const rows = receipts.map(entry => {
-    const files = entry.files.map(f => {
-      const href = `attachments/${encodeURIComponent(entry.folder)}/${encodeURIComponent(f.name)}`;
-      return f.blob
-        ? `<li><a href="${escHtml(href)}">${escHtml(f.name)}</a> <span class="s">${formatBytes(f.byte_size)}</span></li>`
-        : `<li><span class="s">${escHtml(f.name)} — could not be read</span></li>`;
-    }).join('');
-    return `<section><h2>${escHtml(tripLabel(entry.trip))}</h2>
-      <p class="s">${escHtml(entry.trip.miles != null ? entry.trip.miles + ' mi' : 'Mileage pending')}</p>
-      <ul>${files}</ul></section>`;
-  }).join('\n');
-
-  // Only the files that made it in: counting the unreadable ones would promise
-  // more than the folder holds.
-  const fileCount = receipts.reduce((n, e) => n + e.files.filter(f => f.blob).length, 0);
-  return `<!doctype html>
-<html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Mileage log receipts</title>
-<style>
-  body { font-family: system-ui, -apple-system, Segoe UI, sans-serif; margin: 0 auto; padding: 24px;
-         max-width: 760px; color: #0F172A; background: #F8FAFC; }
-  h1 { font-size: 1.3rem; margin: 0 0 4px; }
-  h2 { font-size: .95rem; margin: 0 0 4px; }
-  section { background: #fff; border: 1px solid #E2E8F0; border-radius: 10px;
-            padding: 12px 14px; margin-bottom: 10px; }
-  ul { margin: 6px 0 0; padding-left: 18px; }
-  li { margin: 2px 0; font-size: .88rem; }
-  a { color: #4F46E5; }
-  .s { color: #64748B; font-size: .78rem; }
-</style></head>
-<body>
-  <h1>Mileage log receipts</h1>
-  <p class="s">${receipts.length} trip${receipts.length === 1 ? '' : 's'} with
-     ${fileCount} file${fileCount === 1 ? '' : 's'}, out of ${trips.length} in the log.
-     The full log is in mileage-log.pdf.</p>
-${rows}
-</body></html>`;
-}
-
-async function exportZip() {
-  const btn = document.getElementById('exportZipBtn');
+async function exportSinglePdf() {
+  const btn = document.getElementById('exportFullBtn');
   const original = btn.innerHTML;
   btn.disabled = true;
   const setLabel = txt => { btn.innerHTML = `<i class="fas fa-spinner fa-spin"></i><span class="export-label"> ${txt}</span>`; };
@@ -3821,23 +3836,14 @@ async function exportZip() {
     for (const entry of receipts) {
       for (const file of entry.files) file.thumb = await loadThumb(file);
     }
+    const { links, expiresAt } = await fetchAttachmentLinks(receipts);
 
-    const zip = new JSZip();
-    const doc = exportPDF(receipts, true);
-    zip.file('mileage-log.pdf', doc.output('blob'));
-    zip.file('index.html', buildReceiptIndex(receipts, tripsData));
-    const folder = zip.folder('attachments');
-    for (const entry of receipts) {
-      const sub = folder.folder(entry.folder);
-      for (const file of entry.files) if (file.blob) sub.file(file.name, file.blob);
-    }
-
+    const doc = exportPDF(receipts, true, links, expiresAt);
     const stamp = new Date().toISOString().slice(0, 10);
-    const blob = await zip.generateAsync({ type: 'blob' });
-    triggerDownload(`mileage-log-${stamp}.zip`, 'application/zip', blob);
+    triggerDownload(`mileage-log-${stamp}.pdf`, 'application/pdf', doc.output('blob'));
   } catch (err) {
     console.warn('[export]', err);
-    showError('Could not build the ZIP. The log alone is still available from the PDF button.');
+    showError('Could not build the PDF with receipts. The log alone is still available from the PDF button.');
   } finally {
     btn.disabled = false;
     btn.innerHTML = original;
@@ -3859,6 +3865,5 @@ function triggerDownload(filename, type, content) {
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.28/jspdf.plugin.autotable.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 </body>
 </html>

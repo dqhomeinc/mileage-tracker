@@ -54,6 +54,22 @@ jobs:
       - name: Check trip date and time rules
         run: python .github/scripts/check_trip_times.py
 
+  # /attachment/shared/<token> is the only route that serves a user's data with
+  # no session, and the signed token is the whole of its access control. An
+  # import check cannot see whether ownership is checked before minting, whether
+  # the signature and salt are verified, or whether the expiry is enforced.
+  attachment-links:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Check signed attachment links
+        run: python .github/scripts/check_attachment_links.py
+
   # CI has no DATABASE_URL, so a plain `import app` always falls back to
   # SQLite and never exercises the pg8000 connection or the Postgres branch
   # of _migrate_db() — both of which production actually depends on.

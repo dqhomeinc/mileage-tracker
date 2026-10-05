@@ -1312,6 +1312,100 @@ def download_attachment(att_id):
     })
 
 
+# How long a link written into an exported PDF keeps working. Long enough that
+# a log sent to an accountant is still usable when they get to it, short enough
+# that a PDF forwarded on does not stay a key to the account's receipts forever.
+ATTACHMENT_LINK_MAX_AGE = 30 * 24 * 3600
+
+# A cap on one minting request. The export asks for every attachment it drew, so
+# the number is generous; it exists so a crafted request cannot ask the server
+# to sign an unbounded list. Too many is refused rather than truncated, because
+# a silently short answer would mean a PDF with some links quietly missing.
+MAX_LINKS_PER_REQUEST = 500
+
+ATTACHMENT_LINK_SALT = 'attachment-link-salt'
+
+
+@app.route('/attachments/links', methods=['POST'])
+@login_required
+def mint_attachment_links():
+    """Signed download links for the caller's own attachments.
+
+    This is the only place ownership is checked. The token it returns is what
+    carries that decision afterwards, because /attachment/shared/<token> has no
+    session to check -- the PDF holding the link may be opened on a machine
+    that was never logged in. So the check here is the whole of the access
+    control, and an id the caller does not own is simply left out of the answer.
+    """
+    body = request.get_json(silent=True) or {}
+    ids = body.get('ids')
+    if not isinstance(ids, list):
+        return jsonify({'error': 'ids must be a list.'}), 400
+    if len(ids) > MAX_LINKS_PER_REQUEST:
+        return jsonify({'error': f'At most {MAX_LINKS_PER_REQUEST} links can be requested at once.'}), 400
+    try:
+        wanted = {int(i) for i in ids}
+    except (TypeError, ValueError):
+        return jsonify({'error': 'ids must be numbers.'}), 400
+
+    rows = []
+    if wanted:
+        # Ids only, and scoped through user_id like every other attachment
+        # lookup -- this must not read 5MB of bytes per receipt to decide it is
+        # allowed to name them.
+        rows = (db.session.query(TripAttachment.id)
+                .join(Trip, TripAttachment.trip_id == Trip.id)
+                .filter(TripAttachment.id.in_(wanted), Trip.user_id == current_user.id)
+                .all())
+
+    links = {}
+    for (att_id,) in rows:
+        token = _serializer().dumps(att_id, salt=ATTACHMENT_LINK_SALT)
+        links[str(att_id)] = url_for('shared_attachment', token=token, _external=True)
+    return jsonify({'links': links, 'expires_in': ATTACHMENT_LINK_MAX_AGE})
+
+
+@app.route('/attachment/shared/<token>', methods=['GET'])
+def shared_attachment(token):
+    """One attachment, by signed link, with no session.
+
+    Deliberately narrow: the token names a single attachment id, is signed with
+    the app's SECRET_KEY so it cannot be edited to point at another, and stops
+    working after ATTACHMENT_LINK_MAX_AGE. Anyone holding the link can read
+    that one receipt until then, which is the cost of a link that works from
+    inside a PDF at all.
+    """
+    try:
+        att_id = _serializer().loads(token, salt=ATTACHMENT_LINK_SALT,
+                                     max_age=ATTACHMENT_LINK_MAX_AGE)
+    except SignatureExpired:
+        return jsonify({'error': 'This link has expired. Export the log again for fresh links.'}), 410
+    except BadSignature:
+        return jsonify({'error': 'Not found.'}), 404
+
+    # The payload is only ever an int from the route above, but a token signed
+    # for some other purpose must not be usable here even if the salt ever
+    # collided with one.
+    if not isinstance(att_id, int) or isinstance(att_id, bool):
+        return jsonify({'error': 'Not found.'}), 404
+
+    att = TripAttachment.query.filter_by(id=att_id).first()
+    if not att:
+        return jsonify({'error': 'Not found.'}), 404
+
+    # `attachment`, not `inline`: this serves user-uploaded bytes to someone
+    # with no session, so nothing is rendered inside the app's own origin.
+    # Sniffing stays off for the same reason -- the type was decided from the
+    # bytes on upload, and letting the browser guess again is how an unexpected
+    # upload becomes something it executes.
+    return Response(att.data, mimetype=att.mimetype, headers={
+        'Content-Disposition': f'attachment; filename="{att.filename}"',
+        'X-Content-Type-Options': 'nosniff',
+        'Cache-Control': 'private, max-age=3600',
+        'X-Robots-Tag': 'noindex, nofollow',
+    })
+
+
 @app.route('/attachment/<int:att_id>', methods=['DELETE'])
 @login_required
 def delete_attachment(att_id):
