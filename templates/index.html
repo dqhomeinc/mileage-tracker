@@ -621,9 +621,9 @@
         <button class="export-btn" onclick="exportCSV()" title="Export as CSV">
           <i class="fas fa-file-csv"></i><span class="export-label"> CSV</span>
         </button>
-        <button class="export-btn d-none" id="exportZipBtn" onclick="exportZip()"
-                title="Export the log with its receipts as a ZIP">
-          <i class="fas fa-file-zipper"></i><span class="export-label"> PDF + files</span>
+        <button class="export-btn d-none" id="exportFullBtn" onclick="exportSinglePdf()"
+                title="Export one PDF holding the log and every receipt">
+          <i class="fas fa-file-pdf"></i><span class="export-label"> PDF + receipts</span>
         </button>
       </div>
     </div>
@@ -2925,9 +2925,9 @@ function updateTotalDisplay() {
     document.getElementById('statTripCount').textContent = tripCount;
     bar.classList.remove('d-none');
     btns.classList.remove('d-none');
-    // Only worth offering when there is something to bundle; otherwise the ZIP
-    // would just be a PDF in a wrapper.
-    document.getElementById('exportZipBtn').classList
+    // Only worth offering when there is something to add; otherwise it would
+    // produce exactly what the PDF button already does.
+    document.getElementById('exportFullBtn').classList
       .toggle('d-none', !tripsData.some(t => (t.attachments || []).length));
   } else {
     bar.classList.add('d-none');
@@ -3394,8 +3394,9 @@ const PDF_TRIP_COLUMN_STYLES = {
   7: { cellWidth: 46, overflow: 'linebreak' },  // Notes
 };
 
-// receipts/returnDoc are passed only by the ZIP export, which needs the same
-// log plus a receipts section and wants the document rather than a download.
+// receipts/returnDoc are passed only by the receipts export, which needs the
+// same log plus a receipts section and wants the document rather than a
+// download, so it can keep appending to it.
 function exportPDF(receipts = null, returnDoc = false) {
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF({ orientation: 'landscape' });
@@ -3524,33 +3525,23 @@ function exportPDF(receipts = null, returnDoc = false) {
   doc.save('mileage-log.pdf');
 }
 
-// ─── Log with receipts (ZIP) ──────────────────────────────────────────────
+// ─── Log with receipts (one PDF) ──────────────────────────────────────────
 // The trip table already spends 268 of the 269mm usable across a landscape A4
-// page, so there is no column free for receipts. They go in a section of their
-// own after the log instead, which also gives a thumbnail room to be legible.
+// page, so there is no column free for receipts. They go after the log
+// instead, in three parts: a contact sheet of thumbnails, then one full page
+// per image, then any attached PDF merged in whole.
+//
+// It is one file on purpose. The earlier shape was a ZIP holding the log, the
+// original files and an index.html of links to them, because a PDF cannot be
+// relied on to open a sibling file — Acrobat follows a relative link, the
+// Chrome and Firefox viewers refuse, and phone viewers ignore it, all without
+// saying so. That worked, but it meant opening two files to read one log. The
+// cost of folding it in is that what you get is a rendered copy of each image
+// rather than the original bytes; the originals stay in the app.
 const RECEIPT_THUMB_MM = 34;
 
-// One folder per trip, named so it sorts by date and reads without opening it.
-function tripFolderName(trip, taken) {
-  const date = trip.trip_date || 'undated';
-  // The leading part of each location, before its state and country, taken from
-  // each end separately — splitting the joined string instead would cut it at
-  // the first comma and lose the destination entirely.
-  const place = v => (v || '').split(',')[0];
-  const where = `${place(trip.start)}-to-${place(trip.end)}`
-    .replace(/[^A-Za-z0-9]+/g, '-')
-    .replace(/^-|-$/g, '')
-    .slice(0, 48) || 'trip';
-  let name = `${date}_${where}`;
-  // Two trips can share a date and a route, and a zip cannot hold two folders
-  // of the same name without one silently replacing the other.
-  let n = 2;
-  while (taken.has(name)) name = `${date}_${where}-${n++}`;
-  taken.add(name);
-  return name;
-}
-
-// A filename unique within its trip's folder, for the same reason.
+// A filename unique within its trip, so two receipts uploaded under the same
+// name are still told apart in the overview and on their pages.
 function uniqueFileName(filename, taken) {
   if (!taken.has(filename)) { taken.add(filename); return filename; }
   const dot = filename.lastIndexOf('.');
@@ -3568,29 +3559,30 @@ function tripLabel(trip) {
 }
 
 // Downloads every attachment once. Returns the trips that have any, each with
-// its folder name and its files as blobs, so the PDF, the index and the zip all
-// describe the same bytes rather than fetching them three times.
+// its files as blobs, so the overview, the pages and the merge all describe the
+// same bytes rather than fetching them three times.
 async function collectReceipts(trips, onProgress) {
-  const folders = new Set();
   const out = [];
   const withFiles = trips.filter(t => (t.attachments || []).length);
   let done = 0;
   const total = withFiles.reduce((n, t) => n + t.attachments.length, 0);
   for (const trip of withFiles) {
     const names = new Set();
-    const entry = { trip, folder: tripFolderName(trip, folders), files: [] };
+    const entry = { trip, files: [] };
     for (const att of trip.attachments) {
+      const file = { ...att, name: uniqueFileName(att.filename, names), blob: null,
+                     isPdf: att.mimetype === 'application/pdf' };
       try {
         const resp = await fetch(`/attachment/${att.id}`);
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        entry.files.push({ ...att, name: uniqueFileName(att.filename, names), blob: await resp.blob() });
+        file.blob = await resp.blob();
       } catch (err) {
         // One unreadable file should not cost the whole export; it is recorded
-        // so the index and the PDF can say it is missing rather than imply the
-        // trip had nothing attached.
+        // so the overview can say it is missing rather than imply the trip had
+        // nothing attached.
         console.warn('[export]', att.filename, err);
-        entry.files.push({ ...att, name: uniqueFileName(att.filename, names), blob: null });
       }
+      entry.files.push(file);
       onProgress?.(++done, total);
     }
     out.push(entry);
@@ -3607,34 +3599,31 @@ function blobToDataUrl(blob) {
   });
 }
 
-// The largest box of the image's own proportions that fits the thumbnail
-// square, so a tall receipt is not stretched into a wide one.
-//
-// It always fills the square, including for an image smaller than the box. A
-// previous `Math.min(..., 1)` meant to stop upscaling, but the two sides of
-// that comparison are pixels and millimetres: it left anything under 34px
-// drawn at one millimetre per pixel, so an 8x8px image came out 8mm across.
-// Nothing a camera produces is that small, but filling the box is both
-// unit-honest and what a grid of thumbnails wants — a little blockiness in a
-// 34mm preview costs less than an invisible one.
-function thumbBox(width, height) {
-  const scale = Math.min(RECEIPT_THUMB_MM / width, RECEIPT_THUMB_MM / height);
+// The largest box of the image's own proportions that fits maxW x maxH, so a
+// tall receipt is not stretched into a wide one. It always fills the box,
+// including for an image smaller than it: a little blockiness costs less than
+// a preview too small to see, and the alternative — clamping the scale at 1 —
+// compares pixels against millimetres, which is what once drew an 8x8px image
+// 8mm across.
+function fitBox(width, height, maxW, maxH) {
+  const scale = Math.min(maxW / width, maxH / height);
   return { w: width * scale, h: height * scale };
 }
 
-// Roughly print resolution for the size the thumbnail is drawn at, so the
-// re-encode shrinks a 4MB phone photo to a few tens of KB instead of embedding
-// it whole for a 34mm box.
+// Roughly print resolution for the size each image is drawn at, so the
+// re-encode shrinks a 4MB phone photo to a few tens of KB for a thumbnail and
+// a few hundred for a full page, instead of embedding it whole for either.
 const THUMB_DPI = 200;
+const PAGE_IMAGE_DPI = 150;
 
-// Every thumbnail is re-encoded to JPEG through a canvas, which is the only
-// reason the PDF can draw them at all: jsPDF decodes an image with the
-// processor for the format it is *told*, and an attachment may be PNG, WebP or
-// GIF. A PNG handed over as 'JPEG' throws ("Error while decompressing the
-// data"), and WebP it cannot read in any format. Going through a canvas makes
-// every thumbnail one format that jsPDF definitely handles, at the pixel size
-// actually needed.
-async function loadThumb(file) {
+// Re-encodes an attachment to a JPEG data URL, at the box `pick` chooses for
+// its natural size. This is the only reason the PDF can draw receipts at all:
+// jsPDF decodes an image with the processor for the format it is *told*, and an
+// attachment may be PNG, WebP or GIF. A PNG handed over as 'JPEG' throws
+// ("Error while decompressing the data"), and WebP it cannot read in any
+// format. Going through a canvas makes every image one format jsPDF definitely
+// handles, at the pixel size actually needed.
+async function renderToJpeg(file, pick, dpi, quality) {
   if (!file.blob || !file.previewable) return null;
   try {
     const dataUrl = await blobToDataUrl(file.blob);
@@ -3644,8 +3633,8 @@ async function loadThumb(file) {
       el.onerror = () => reject(new Error('not decodable'));
       el.src = dataUrl;
     });
-    const box = thumbBox(img.naturalWidth, img.naturalHeight);
-    const scale = THUMB_DPI / 25.4;
+    const box = pick(img);
+    const scale = dpi / 25.4;
     const canvas = document.createElement('canvas');
     canvas.width  = Math.max(1, Math.round(box.w * scale));
     canvas.height = Math.max(1, Math.round(box.h * scale));
@@ -3655,21 +3644,43 @@ async function loadThumb(file) {
     ctx.fillStyle = '#FFFFFF';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-    return { dataUrl: canvas.toDataURL('image/jpeg', 0.82), ...box };
+    return { dataUrl: canvas.toDataURL('image/jpeg', quality), ...box };
   } catch (err) {
     // A file whose bytes passed the server's sniffing can still fail to decode
-    // here, and a browser without canvas support lands here too. It stays in
-    // the zip and is listed, just without a thumbnail.
+    // here — HEIC in anything but Safari is the usual case — and a browser
+    // without canvas support lands here too. It is listed by name instead.
     console.warn('[export] could not render', file.filename, err);
     return null;
   }
 }
 
+const loadThumb = file =>
+  renderToJpeg(file, img => fitBox(img.naturalWidth, img.naturalHeight,
+                                  RECEIPT_THUMB_MM, RECEIPT_THUMB_MM),
+               THUMB_DPI, 0.82);
+
 const PAGE_MARGIN = 14;
 const THUMB_GAP = 4;
-const THUMB_CAPTION_H = 3.5;
+const THUMB_CAPTION_H = 7;   // two lines: the filename, then where to find it
 const NAMED_LINE_H = 5;
 const ENTRY_HEADER_H = 9;
+const PAGE_IMAGE_TOP = 22;   // below the trip and filename headings
+
+// How much of a page is left for the image, in each orientation, for A4.
+const PAGE_BOXES = {
+  landscape: { w: 297 - PAGE_MARGIN * 2, h: 210 - PAGE_IMAGE_TOP - PAGE_MARGIN },
+  portrait:  { w: 210 - PAGE_MARGIN * 2, h: 297 - PAGE_IMAGE_TOP - PAGE_MARGIN },
+};
+
+// A receipt gets the page shape that suits it: a phone photo of a till roll is
+// portrait, and fitting it to a landscape page would waste half the paper and
+// leave the print too small to read.
+const loadPageImage = file =>
+  renderToJpeg(file, img => {
+    const orientation = img.naturalHeight >= img.naturalWidth ? 'portrait' : 'landscape';
+    const box = PAGE_BOXES[orientation];
+    return { ...fitBox(img.naturalWidth, img.naturalHeight, box.w, box.h), orientation };
+  }, PAGE_IMAGE_DPI, 0.86);
 
 // Thumbnails packed into rows that stop at the right margin, with the height
 // each row needs. Measured before anything is drawn, because the page-break
@@ -3692,15 +3703,18 @@ function layOutThumbs(files, usableWidth) {
   return rows;
 }
 
+// The contact sheet: every receipt at a glance, grouped by trip. Each entry
+// also records where its "page N" caption goes, on `file.slot`, because the
+// pages it points at are not drawn until this section is finished.
 function appendReceiptSection(doc, receipts) {
   if (!receipts.length) return;
-  doc.addPage();
+  doc.addPage('a4', 'landscape');
   doc.setFontSize(13);
   doc.setTextColor(30, 41, 59);
   doc.text('Receipts & documents', PAGE_MARGIN, 20);
   doc.setFontSize(9);
   doc.setTextColor(100, 116, 139);
-  doc.text('Originals are in the attachments folder of this ZIP, one folder per trip.',
+  doc.text('Each receipt has a full page of its own further on — click a thumbnail to jump to it.',
            PAGE_MARGIN, 26);
 
   const pageBottom = doc.internal.pageSize.getHeight() - PAGE_MARGIN;
@@ -3708,9 +3722,9 @@ function appendReceiptSection(doc, receipts) {
   let y = 36;
 
   for (const entry of receipts) {
-    // Split by what can actually be drawn. A file whose thumbnail failed to
-    // load is listed by name like a PDF or a HEIC — the two are the same case
-    // as far as this layout is concerned.
+    // Split by what can actually be drawn here. A file whose thumbnail failed
+    // to load is listed by name, as are PDFs — the two are the same case as far
+    // as this layout is concerned, even though a PDF does get pages of its own.
     const drawable = entry.files.filter(f => f.thumb);
     const named    = entry.files.filter(f => !f.thumb);
     const rows = layOutThumbs(drawable, usableWidth);
@@ -3719,29 +3733,32 @@ function appendReceiptSection(doc, receipts) {
     const blockHeight = ENTRY_HEADER_H + thumbsHeight + named.length * NAMED_LINE_H + 6;
     // A trip with many receipts can be taller than a page on its own, so it
     // only moves to a fresh page when that would actually help.
-    if (y > 36 && y + blockHeight > pageBottom) { doc.addPage(); y = 20; }
+    if (y > 36 && y + blockHeight > pageBottom) { doc.addPage('a4', 'landscape'); y = 20; }
 
     doc.setFontSize(9.5);
     doc.setTextColor(30, 41, 59);
     doc.text(tripLabel(entry.trip), PAGE_MARGIN, y);
     doc.setFontSize(8);
     doc.setTextColor(100, 116, 139);
-    doc.text(`attachments/${entry.folder}/`, PAGE_MARGIN, y + 5);
+    doc.text(entry.files.length === 1 ? '1 file' : `${entry.files.length} files`, PAGE_MARGIN, y + 5);
     y += ENTRY_HEADER_H;
 
     for (const row of rows) {
-      if (y + row.height + THUMB_CAPTION_H > pageBottom) { doc.addPage(); y = 20; }
+      if (y + row.height + THUMB_CAPTION_H > pageBottom) { doc.addPage('a4', 'landscape'); y = 20; }
       let x = PAGE_MARGIN;
       for (const file of row.files) {
         try {
           doc.addImage(file.thumb.dataUrl, 'JPEG', x, y, file.thumb.w, file.thumb.h);
           doc.setFontSize(6.5);
           doc.setTextColor(100, 116, 139);
-          doc.text(file.name.slice(0, 26), x, y + file.thumb.h + THUMB_CAPTION_H);
+          doc.text(file.name.slice(0, 26), x, y + file.thumb.h + 3.5);
+          file.slot = { page: doc.internal.getCurrentPageInfo().pageNumber,
+                        x, y, w: file.thumb.w, h: file.thumb.h,
+                        captionY: y + file.thumb.h + THUMB_CAPTION_H };
           x += file.thumb.w + THUMB_GAP;
         } catch (err) {
-          // One image jsPDF will not take must not cost the whole export: the
-          // file is still in the zip, so it falls back to being named.
+          // One image jsPDF will not take must not cost the whole export: it
+          // falls back to being named below.
           console.warn('[export] could not draw', file.name, err);
           named.push(file);
         }
@@ -3752,63 +3769,155 @@ function appendReceiptSection(doc, receipts) {
     // Below the thumbnails rather than beside them, each on its own line, so
     // nothing is drawn over anything else.
     for (const file of named) {
-      if (y + NAMED_LINE_H > pageBottom) { doc.addPage(); y = 20; }
+      if (y + NAMED_LINE_H > pageBottom) { doc.addPage('a4', 'landscape'); y = 20; }
       doc.setFontSize(8);
       doc.setTextColor(71, 85, 105);
-      doc.text(`• ${file.name}${file.blob ? '' : '  (could not be read)'}`, PAGE_MARGIN, y + 4);
+      const label = `• ${file.name}${file.blob ? '' : '  (could not be read)'}`;
+      doc.text(label, PAGE_MARGIN, y + 4);
+      // No thumbnail to click, so only the caption is a slot, set beside the
+      // name. A PDF still gets one: its own pages are merged in at the end.
+      file.slot = { page: doc.internal.getCurrentPageInfo().pageNumber,
+                    x: PAGE_MARGIN + doc.getTextWidth(label) + 3, y: y + 4, w: 0, h: 0,
+                    captionY: y + 4 };
       y += NAMED_LINE_H;
     }
     y += 6;
   }
 }
 
-// A plain page of links. This exists because a PDF cannot be relied on to open
-// a sibling file: Acrobat follows a relative link, Chrome's and Firefox's
-// built-in viewers refuse, and phone viewers ignore it — all without saying so.
-// A browser opening this file follows the same links without complaint.
-function buildReceiptIndex(receipts, trips) {
-  const rows = receipts.map(entry => {
-    const files = entry.files.map(f => {
-      const href = `attachments/${encodeURIComponent(entry.folder)}/${encodeURIComponent(f.name)}`;
-      return f.blob
-        ? `<li><a href="${escHtml(href)}">${escHtml(f.name)}</a> <span class="s">${formatBytes(f.byte_size)}</span></li>`
-        : `<li><span class="s">${escHtml(f.name)} — could not be read</span></li>`;
-    }).join('');
-    return `<section><h2>${escHtml(tripLabel(entry.trip))}</h2>
-      <p class="s">${escHtml(entry.trip.miles != null ? entry.trip.miles + ' mi' : 'Mileage pending')}</p>
-      <ul>${files}</ul></section>`;
-  }).join('\n');
-
-  // Only the files that made it in: counting the unreadable ones would promise
-  // more than the folder holds.
-  const fileCount = receipts.reduce((n, e) => n + e.files.filter(f => f.blob).length, 0);
-  return `<!doctype html>
-<html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Mileage log receipts</title>
-<style>
-  body { font-family: system-ui, -apple-system, Segoe UI, sans-serif; margin: 0 auto; padding: 24px;
-         max-width: 760px; color: #0F172A; background: #F8FAFC; }
-  h1 { font-size: 1.3rem; margin: 0 0 4px; }
-  h2 { font-size: .95rem; margin: 0 0 4px; }
-  section { background: #fff; border: 1px solid #E2E8F0; border-radius: 10px;
-            padding: 12px 14px; margin-bottom: 10px; }
-  ul { margin: 6px 0 0; padding-left: 18px; }
-  li { margin: 2px 0; font-size: .88rem; }
-  a { color: #4F46E5; }
-  .s { color: #64748B; font-size: .78rem; }
-</style></head>
-<body>
-  <h1>Mileage log receipts</h1>
-  <p class="s">${receipts.length} trip${receipts.length === 1 ? '' : 's'} with
-     ${fileCount} file${fileCount === 1 ? '' : 's'}, out of ${trips.length} in the log.
-     The full log is in mileage-log.pdf.</p>
-${rows}
-</body></html>`;
+// One page per image, as large as the page allows, so the PDF is something a
+// receipt can actually be read from rather than a sheet of 34mm previews.
+// Records the page it landed on, on `file.pageNumber`.
+function appendReceiptPages(doc, receipts) {
+  for (const entry of receipts) {
+    for (const file of entry.files) {
+      if (!file.page) continue;
+      doc.addPage('a4', file.page.orientation);
+      doc.setFontSize(9.5);
+      doc.setTextColor(30, 41, 59);
+      doc.text(tripLabel(entry.trip), PAGE_MARGIN, 14);
+      doc.setFontSize(8);
+      doc.setTextColor(100, 116, 139);
+      doc.text(file.name, PAGE_MARGIN, 19);
+      const x = (doc.internal.pageSize.getWidth() - file.page.w) / 2;
+      try {
+        doc.addImage(file.page.dataUrl, 'JPEG', x, PAGE_IMAGE_TOP, file.page.w, file.page.h);
+        file.pageNumber = doc.internal.getCurrentPageInfo().pageNumber;
+      } catch (err) {
+        // The page stays, saying so, rather than being removed: deleting it
+        // would renumber every page after it, including ones already recorded.
+        console.warn('[export] could not draw', file.name, err);
+        doc.setTextColor(185, 28, 28);
+        doc.text('This image could not be drawn. The original is in the app.',
+                 PAGE_MARGIN, PAGE_IMAGE_TOP + 6);
+      }
+    }
+  }
 }
 
-async function exportZip() {
-  const btn = document.getElementById('exportZipBtn');
+// Every attached PDF that will actually merge, and how many pages it has, read
+// up front so the overview can say where each one starts before the merge
+// happens. The parsed document is kept so the merge does not read the same
+// bytes twice.
+//
+// Loading is not enough to know a PDF will merge: `ignoreEncryption` lets an
+// encrypted file load and then fail when its pages are copied. So each one is
+// also copied into a throwaway document here. Finding that out now rather than
+// during the merge is what keeps the page numbering honest — a PDF dropped
+// after the captions are written would shift every later reference.
+async function readAttachedPdfs(receipts) {
+  const out = [];
+  if (!window.PDFLib) return out;
+  for (const entry of receipts) {
+    for (const file of entry.files) {
+      if (!file.isPdf || !file.blob) continue;
+      try {
+        const src = await PDFLib.PDFDocument.load(await file.blob.arrayBuffer(),
+                                                 { ignoreEncryption: true });
+        const scratch = await PDFLib.PDFDocument.create();
+        await scratch.copyPages(src, src.getPageIndices());
+        file.pdfDoc = src;
+        file.pdfPageCount = src.getPageCount();
+        out.push(file);
+      } catch (err) {
+        // An encrypted or malformed PDF is listed by name like any other file
+        // that cannot be rendered, with no page reference of its own.
+        console.warn('[export] could not read', file.name, err);
+      }
+    }
+  }
+  return out;
+}
+
+// Writes each receipt's "page N" caption and makes its thumbnail a link, once
+// every page is known. Deferred because the overview is drawn before the pages
+// it points at exist.
+//
+// Only images get a clickable link. A merged PDF's pages are added by pdf-lib
+// after jsPDF has written the file, so there is no page object for a jsPDF
+// annotation to point at — the caption says the number instead.
+function resolveReceiptRefs(doc, receipts) {
+  const current = doc.internal.getCurrentPageInfo().pageNumber;
+  for (const entry of receipts) {
+    for (const file of entry.files) {
+      if (!file.slot || !file.pageNumber) continue;
+      doc.setPage(file.slot.page);
+      doc.setFontSize(6.5);
+      doc.setTextColor(79, 70, 229);
+      doc.text(`page ${file.pageNumber}`, file.slot.x, file.slot.captionY);
+      if (file.slot.w && file.page) {
+        doc.link(file.slot.x, file.slot.y, file.slot.w, file.slot.h,
+                 { pageNumber: file.pageNumber });
+      }
+    }
+  }
+  doc.setPage(current);
+}
+
+// Appends every attached PDF whole, rather than redrawing it, so a multi-page
+// invoice arrives intact and still selectable as text.
+async function mergeAttachedPdfs(doc, pdfFiles) {
+  const base = await PDFLib.PDFDocument.load(doc.output('arraybuffer'));
+  for (const file of pdfFiles) {
+    let pages = null;
+    try {
+      pages = await base.copyPages(file.pdfDoc, file.pdfDoc.getPageIndices());
+    } catch (err) {
+      // readAttachedPdfs already copied this file once, so this is not
+      // expected. It still has to take up its page count: the "page N"
+      // captions were written into `doc` before this ran, so dropping the
+      // pages would leave every later reference pointing at the wrong place.
+      console.warn('[export] could not merge', file.name, err);
+    }
+    if (pages) {
+      for (const page of pages) base.addPage(page);
+      continue;
+    }
+    // One placeholder per page the file would have contributed, each the size
+    // of the page it stands in for, so the document still reads as the
+    // original's shape rather than switching to Letter halfway through.
+    for (let i = 0; i < file.pdfPageCount; i++) {
+      let size = null;
+      try {
+        size = file.pdfDoc.getPage(i).getSize();
+      } catch (err) {
+        size = null;   // pdf-lib's own default is fine as a last resort
+      }
+      const page = base.addPage();
+      // setSize rather than addPage([w, h]): the array form is type-checked
+      // against pdf-lib's own Array, which an array built anywhere else is not.
+      if (size) page.setSize(size.width, size.height);
+      page.drawText(`${file.name} could not be included in this PDF.`,
+                    { x: 50, y: page.getHeight() - 70, size: 12 });
+      page.drawText('The original is still attached to the trip in the app.',
+                    { x: 50, y: page.getHeight() - 90, size: 10 });
+    }
+  }
+  return new Blob([await base.save()], { type: 'application/pdf' });
+}
+
+async function exportSinglePdf() {
+  const btn = document.getElementById('exportFullBtn');
   const original = btn.innerHTML;
   btn.disabled = true;
   const setLabel = txt => { btn.innerHTML = `<i class="fas fa-spinner fa-spin"></i><span class="export-label"> ${txt}</span>`; };
@@ -3818,26 +3927,33 @@ async function exportZip() {
     if (!receipts.length) { exportPDF(); return; }
 
     setLabel('Building…');
+    // Both renders and the PDF page counts are done before anything is drawn,
+    // because the overview's page references depend on all three.
     for (const entry of receipts) {
-      for (const file of entry.files) file.thumb = await loadThumb(file);
+      for (const file of entry.files) {
+        file.thumb = await loadThumb(file);
+        file.page  = await loadPageImage(file);
+      }
     }
+    const pdfFiles = await readAttachedPdfs(receipts);
 
-    const zip = new JSZip();
     const doc = exportPDF(receipts, true);
-    zip.file('mileage-log.pdf', doc.output('blob'));
-    zip.file('index.html', buildReceiptIndex(receipts, tripsData));
-    const folder = zip.folder('attachments');
-    for (const entry of receipts) {
-      const sub = folder.folder(entry.folder);
-      for (const file of entry.files) if (file.blob) sub.file(file.name, file.blob);
+    appendReceiptPages(doc, receipts);
+    // Merged pages land after everything jsPDF wrote, in the order they are
+    // merged, so their numbers can be assigned now.
+    let next = doc.internal.getNumberOfPages() + 1;
+    for (const file of pdfFiles) {
+      file.pageNumber = next;
+      next += file.pdfPageCount;
     }
+    resolveReceiptRefs(doc, receipts);
 
     const stamp = new Date().toISOString().slice(0, 10);
-    const blob = await zip.generateAsync({ type: 'blob' });
-    triggerDownload(`mileage-log-${stamp}.zip`, 'application/zip', blob);
+    const blob = pdfFiles.length ? await mergeAttachedPdfs(doc, pdfFiles) : doc.output('blob');
+    triggerDownload(`mileage-log-${stamp}.pdf`, 'application/pdf', blob);
   } catch (err) {
     console.warn('[export]', err);
-    showError('Could not build the ZIP. The log alone is still available from the PDF button.');
+    showError('Could not build the PDF with receipts. The log alone is still available from the PDF button.');
   } finally {
     btn.disabled = false;
     btn.innerHTML = original;
@@ -3859,6 +3975,6 @@ function triggerDownload(filename, type, content) {
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.28/jspdf.plugin.autotable.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
 </body>
 </html>
