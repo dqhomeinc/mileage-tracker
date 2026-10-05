@@ -3815,9 +3815,16 @@ function appendReceiptPages(doc, receipts) {
   }
 }
 
-// Every attached PDF, and how many pages it has, read up front so the overview
-// can say where each one starts before the merge actually happens. The parsed
-// document is kept so the merge does not read the same bytes twice.
+// Every attached PDF that will actually merge, and how many pages it has, read
+// up front so the overview can say where each one starts before the merge
+// happens. The parsed document is kept so the merge does not read the same
+// bytes twice.
+//
+// Loading is not enough to know a PDF will merge: `ignoreEncryption` lets an
+// encrypted file load and then fail when its pages are copied. So each one is
+// also copied into a throwaway document here. Finding that out now rather than
+// during the merge is what keeps the page numbering honest — a PDF dropped
+// after the captions are written would shift every later reference.
 async function readAttachedPdfs(receipts) {
   const out = [];
   if (!window.PDFLib) return out;
@@ -3825,12 +3832,16 @@ async function readAttachedPdfs(receipts) {
     for (const file of entry.files) {
       if (!file.isPdf || !file.blob) continue;
       try {
-        file.pdfDoc = await PDFLib.PDFDocument.load(await file.blob.arrayBuffer(),
-                                                   { ignoreEncryption: true });
+        const src = await PDFLib.PDFDocument.load(await file.blob.arrayBuffer(),
+                                                 { ignoreEncryption: true });
+        const scratch = await PDFLib.PDFDocument.create();
+        await scratch.copyPages(src, src.getPageIndices());
+        file.pdfDoc = src;
+        file.pdfPageCount = src.getPageCount();
         out.push(file);
       } catch (err) {
         // An encrypted or malformed PDF is listed by name like any other file
-        // that cannot be rendered.
+        // that cannot be rendered, with no page reference of its own.
         console.warn('[export] could not read', file.name, err);
       }
     }
@@ -3868,13 +3879,38 @@ function resolveReceiptRefs(doc, receipts) {
 async function mergeAttachedPdfs(doc, pdfFiles) {
   const base = await PDFLib.PDFDocument.load(doc.output('arraybuffer'));
   for (const file of pdfFiles) {
+    let pages = null;
     try {
-      const pages = await base.copyPages(file.pdfDoc, file.pdfDoc.getPageIndices());
-      for (const page of pages) base.addPage(page);
+      pages = await base.copyPages(file.pdfDoc, file.pdfDoc.getPageIndices());
     } catch (err) {
-      // The log and the images are already in `base`, so a PDF that will not
-      // copy costs only itself.
+      // readAttachedPdfs already copied this file once, so this is not
+      // expected. It still has to take up its page count: the "page N"
+      // captions were written into `doc` before this ran, so dropping the
+      // pages would leave every later reference pointing at the wrong place.
       console.warn('[export] could not merge', file.name, err);
+    }
+    if (pages) {
+      for (const page of pages) base.addPage(page);
+      continue;
+    }
+    // One placeholder per page the file would have contributed, each the size
+    // of the page it stands in for, so the document still reads as the
+    // original's shape rather than switching to Letter halfway through.
+    for (let i = 0; i < file.pdfPageCount; i++) {
+      let size = null;
+      try {
+        size = file.pdfDoc.getPage(i).getSize();
+      } catch (err) {
+        size = null;   // pdf-lib's own default is fine as a last resort
+      }
+      const page = base.addPage();
+      // setSize rather than addPage([w, h]): the array form is type-checked
+      // against pdf-lib's own Array, which an array built anywhere else is not.
+      if (size) page.setSize(size.width, size.height);
+      page.drawText(`${file.name} could not be included in this PDF.`,
+                    { x: 50, y: page.getHeight() - 70, size: 12 });
+      page.drawText('The original is still attached to the trip in the app.',
+                    { x: 50, y: page.getHeight() - 90, size: 10 });
     }
   }
   return new Blob([await base.save()], { type: 'application/pdf' });
@@ -3908,7 +3944,7 @@ async function exportSinglePdf() {
     let next = doc.internal.getNumberOfPages() + 1;
     for (const file of pdfFiles) {
       file.pageNumber = next;
-      next += file.pdfDoc.getPageCount();
+      next += file.pdfPageCount;
     }
     resolveReceiptRefs(doc, receipts);
 
