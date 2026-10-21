@@ -100,6 +100,15 @@ jobs:
         env:
           DATABASE_URL: postgresql://testuser:testpass@localhost:5432/testdb
         run: python -c "import app"
+      # The logging-key job runs this against SQLite. The gate's failure
+      # counter is a single UPDATE with a CASE on each column, and SQLite
+      # serialises writers — so the concurrent part of that check only asserts
+      # the invariant there. Against real Postgres the guesses actually
+      # interleave, which is the case the atomic statement exists for.
+      - name: Check the logging key gate against real Postgres
+        env:
+          DATABASE_URL: postgresql://testuser:testpass@localhost:5432/testdb
+        run: python .github/scripts/check_logging_key.py
 
   dependency-audit:
     runs-on: ubuntu-latest
