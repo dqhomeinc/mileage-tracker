@@ -351,14 +351,25 @@ def _migrate_db():
 # A short code the user has to type to log or edit a trip, to stop trips being
 # written by a script rather than a person.
 #
-# What this does and does not do is worth being exact about. It is a speed bump
-# against automation, not an authentication factor: it stops a script that
-# simply POSTs to /log, because the code is not in the page. It does not stop
-# the account holder automating their own logging, since the code is theirs.
-# And it would not stop a script driving a stolen session either -- except that
-# the code is deliberately not printed on the profile page. Revealing it costs
-# the account password (see reveal_logging_key), so reading it off the profile
-# is not something a session alone can do.
+# What this does and does not do is worth being exact about, because the shape
+# of it invites being read as more than it is. It is not an authentication
+# factor. The goal is that logging cannot be automated *incidentally* -- only
+# by a user who deliberately hands their own key to a script, which is a choice
+# they have made rather than something that falls out of the app being easy to
+# POST to.
+#
+# So: it stops a script that simply POSTs to /log, because the code is nowhere
+# in the page it would be scraping. It would not stop a script driving a stolen
+# session either -- except that the code is deliberately not printed on the
+# profile page; revealing it costs the account password (see
+# reveal_logging_key), so reading it off the profile is not something a session
+# alone can do. And it does not stop the account holder giving the code to
+# their own script, which nothing held by the user ever could. That last case
+# is accepted: it makes automation a deliberate act instead of a free one.
+#
+# The code is required on every log and every edit for the same reason. A value
+# cached between trips would make the first entry the deliberate act and every
+# trip after it free again.
 
 LOGGING_KEY_LENGTH = 8
 
