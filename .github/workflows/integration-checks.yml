@@ -54,6 +54,22 @@ jobs:
       - name: Check trip date and time rules
         run: python .github/scripts/check_trip_times.py
 
+  # The logging key is the only thing between a session and a scripted write to
+  # /log, and the password gate on revealing it is the only reason the key is
+  # not simply readable by anything already signed in. Neither a template
+  # render nor an import check can see either property.
+  logging-key:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Check the per-user logging key
+        run: python .github/scripts/check_logging_key.py
+
   # CI has no DATABASE_URL, so a plain `import app` always falls back to
   # SQLite and never exercises the pg8000 connection or the Postgres branch
   # of _migrate_db() — both of which production actually depends on.

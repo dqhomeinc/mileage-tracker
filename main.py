@@ -1,7 +1,9 @@
 import base64
+import hmac
 import json
 import os
 import re
+import secrets
 from datetime import datetime, date, timedelta
 import requests
 from dotenv import load_dotenv
@@ -95,6 +97,10 @@ class User(UserMixin, db.Model):
     # in _migrate_db() can't add a constraint. Ownership is checked in the route
     # and delete_vehicle() clears it, so a stale id can't outlive its vehicle.
     default_vehicle_id = db.Column(db.Integer, nullable=True)
+    # The code the user types to log or edit a trip. Null for accounts that
+    # existed before this column; logging_key_for() mints one on first use
+    # rather than a backfill over every row inside _migrate_db().
+    logging_key = db.Column(db.String(32), nullable=True)
     # The business preselected when logging a new trip. Same reasoning as
     # default_vehicle_id above: a scalar here rather than a flag per row, so
     # only one business can be the default by construction.
@@ -322,8 +328,124 @@ def _migrate_db():
             conn.execute(db.text('ALTER TABLE "user" ADD COLUMN default_vehicle_id INTEGER'))
         if 'default_business_id' not in existing_user_cols:
             conn.execute(db.text('ALTER TABLE "user" ADD COLUMN default_business_id INTEGER'))
+        if 'logging_key' not in existing_user_cols:
+            conn.execute(db.text('ALTER TABLE "user" ADD COLUMN logging_key VARCHAR(32)'))
 
         conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Per-user logging key
+# ---------------------------------------------------------------------------
+#
+# A short code the user has to type to log or edit a trip, to stop trips being
+# written by a script rather than a person.
+#
+# What this does and does not do is worth being exact about. It is a speed bump
+# against automation, not an authentication factor: it stops a script that
+# simply POSTs to /log, because the code is not in the page. It does not stop
+# the account holder automating their own logging, since the code is theirs.
+# And it would not stop a script driving a stolen session either -- except that
+# the code is deliberately not printed on the profile page. Revealing it costs
+# the account password (see reveal_logging_key), so reading it off the profile
+# is not something a session alone can do.
+
+LOGGING_KEY_LENGTH = 8
+
+# No I, L, O, U, 0 or 1. The code is read off a screen and typed back, and
+# those are the characters that get read back wrong.
+_LOGGING_KEY_ALPHABET = 'ABCDEFGHJKMNPQRSTVWXYZ23456789'
+
+_LOGGING_KEY_STRIP = re.compile(r'[^A-Z0-9]')
+
+
+def generate_logging_key():
+    return ''.join(secrets.choice(_LOGGING_KEY_ALPHABET) for _ in range(LOGGING_KEY_LENGTH))
+
+
+def normalize_logging_key(value):
+    """What the user typed, reduced to what is actually compared.
+
+    The code is shown grouped ("ABCD-2345") and will be typed back with or
+    without the dash, in either case, and often with a stray space from a
+    copy-paste. Those are all the same code, and refusing them would read as
+    the feature being broken.
+    """
+    return _LOGGING_KEY_STRIP.sub('', (value or '').upper())
+
+
+def format_logging_key(key):
+    """The code as it is displayed: one dash in the middle, which is most of
+    why anyone copies eight characters correctly."""
+    if not key:
+        return ''
+    half = LOGGING_KEY_LENGTH // 2
+    return f'{key[:half]}-{key[half:]}'
+
+
+def logging_key_for(user):
+    """The user's code, minted on first use.
+
+    Accounts that existed before the column have none, and backfilling them
+    would mean a write over every row inside _migrate_db(). Minting on the
+    first read keeps the migration to one ALTER TABLE, at the cost of this
+    function being the only way the rest of the app should read the column.
+    """
+    if not user.logging_key:
+        user.logging_key = generate_logging_key()
+        db.session.commit()
+    return user.logging_key
+
+
+def check_logging_key(data):
+    """None if the request carried the right code, else the message to return.
+
+    Compared with compare_digest rather than ==, so the comparison does not
+    stop early on the first wrong character.
+
+    Deliberately not rate-limited. The code is eight characters from a
+    thirty-character alphabet, so guessing it over HTTP is not a threat worth
+    a lockout -- and a lockout here would stop a legitimate user logging their
+    trips, which is a worse outcome than the one it would prevent.
+    """
+    supplied = normalize_logging_key((data or {}).get('logging_key'))
+    if not supplied:
+        return 'Enter your logging key to save this trip. You can find it in your profile.'
+    if not hmac.compare_digest(supplied, logging_key_for(current_user)):
+        return 'That logging key is not correct. Check it in your profile and try again.'
+    return None
+
+
+@app.route('/profile/logging-key', methods=['POST'])
+@login_required
+def reveal_logging_key():
+    """The code, shown only once the account password is re-entered.
+
+    This is what makes the code worth having at all. A script driving a stolen
+    session can already reach /log, so a code printed on the profile page could
+    just be read off it. Behind the password, that script needs the password
+    too -- at which point it is not the thing this was meant to stop.
+    """
+    data = request.get_json(silent=True) or {}
+    if not current_user.check_password(data.get('password') or ''):
+        return jsonify({'error': 'Password is incorrect.'}), 403
+    return jsonify({'logging_key': format_logging_key(logging_key_for(current_user))})
+
+
+@app.route('/profile/logging-key', methods=['PUT'])
+@login_required
+def regenerate_logging_key():
+    """A fresh code, which immediately invalidates the old one.
+
+    Also behind the password: rotating someone's code is a way to lock them out
+    of logging trips until they look it up again.
+    """
+    data = request.get_json(silent=True) or {}
+    if not current_user.check_password(data.get('password') or ''):
+        return jsonify({'error': 'Password is incorrect.'}), 403
+    current_user.logging_key = generate_logging_key()
+    db.session.commit()
+    return jsonify({'logging_key': format_logging_key(current_user.logging_key)})
 
 
 # ---------------------------------------------------------------------------
@@ -990,6 +1112,12 @@ def _resolve_business(business_id):
 @login_required
 def log_trip():
     data = request.get_json()
+    # Before anything else, including the distance lookup: a request without
+    # the key should not be able to spend a Routes call.
+    key_error = check_logging_key(data)
+    if key_error:
+        return jsonify({'error': key_error}), 403
+
     start = (data.get('start') or '').strip()
     end   = (data.get('end')   or '').strip()
     if not start or not end:
@@ -1117,6 +1245,10 @@ def update_trip(trip_id):
     if not trip:
         return jsonify({'error': 'Trip not found.'}), 404
     data           = request.get_json()
+    key_error      = check_logging_key(data)
+    if key_error:
+        return jsonify({'error': key_error}), 403
+
     start          = (data.get('start') or '').strip()
     end            = (data.get('end')   or '').strip()
     distance_miles = data.get('distance_miles')
