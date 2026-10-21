@@ -2,7 +2,8 @@
 
 The key is the only thing standing between a session and a scripted write to
 /log, so the rules around it are worth pinning down: the code is never rendered
-into a page, revealing or rotating it costs the account password, the comparison
+into a page, revealing or rotating it costs the account password, that password
+gate is throttled so it is not an unlimited guessing oracle, the comparison
 accepts the formatting a user will actually type, one account's key must not
 work on another's, and both write routes must refuse a request without it.
 
@@ -201,6 +202,67 @@ expect('an account with no key still cannot log without one',
 expect('and an empty key is not accepted as matching a null column',
        blank_client.post('/log', json=trip_body('')).status_code, 403)
 
+# ── The password gate is throttled ─────────────────────────────────────
+# The key itself is not worth guessing, but the password in front of it is, and
+# an unlimited number of attempts would make these two routes a password oracle
+# for anyone already holding the session. A lockout is cheap here because it
+# blocks looking the key up, not logging trips.
+throttled = make_user('throttled')
+throttle_key = main.normalize_logging_key(
+    throttled.post('/profile/logging-key', json={'password': PASSWORD}).get_json()['logging_key'])
+
+codes = [throttled.post('/profile/logging-key', json={'password': 'Nope123!'}).status_code
+         for _ in range(main.LOGGING_KEY_MAX_ATTEMPTS)]
+expect('every attempt up to the limit is refused as a bad password',
+       codes, [403] * main.LOGGING_KEY_MAX_ATTEMPTS)
+
+locked = throttled.post('/profile/logging-key', json={'password': 'Nope123!'})
+expect('the next attempt is locked out rather than answered', locked.status_code, 429)
+expect('and says how long to wait',
+       'Try again in' in (locked.get_json().get('error') or ''), True)
+
+# The lockout has to hold against the *right* password too, or it is only a
+# speed bump on the wrong one and the oracle is still open.
+still = throttled.post('/profile/logging-key', json={'password': PASSWORD})
+expect('the lockout holds even for the correct password', still.status_code, 429)
+expect('so the key is not revealed during a lockout',
+       'logging_key' in still.get_json(), False)
+expect('rotating is locked out too, not just revealing',
+       throttled.put('/profile/logging-key', json={'password': PASSWORD}).status_code, 429)
+
+# Logging must keep working through a lockout. That is the whole reason the
+# throttle is here and not on /log.
+expect('a locked-out user can still log trips with the key they already have',
+       throttled.post('/log', json=trip_body(throttle_key)).status_code, 200)
+
+# Once the window passes, the gate reopens and the counter is clear.
+with main.app.app_context():
+    user = main.User.query.filter_by(email='throttled@example.com').first()
+    user.key_reveal_locked_until = main._utcnow() - main.timedelta(seconds=1)
+    main.db.session.commit()
+expect('the gate reopens once the window has passed',
+       throttled.post('/profile/logging-key', json={'password': PASSWORD}).status_code, 200)
+with main.app.app_context():
+    user = main.User.query.filter_by(email='throttled@example.com').first()
+    expect('and a success clears the lockout', user.key_reveal_locked_until, None)
+    expect('and the failure count with it', user.key_reveal_fails or 0, 0)
+
+# A correct password mid-way must reset the count, so ordinary mistyping never
+# accumulates into a lockout over days of use.
+patient = make_user('patient')
+for _ in range(main.LOGGING_KEY_MAX_ATTEMPTS - 1):
+    patient.post('/profile/logging-key', json={'password': 'Nope123!'})
+expect('a correct password after some misses is accepted',
+       patient.post('/profile/logging-key', json={'password': PASSWORD}).status_code, 200)
+for _ in range(main.LOGGING_KEY_MAX_ATTEMPTS - 1):
+    patient.post('/profile/logging-key', json={'password': 'Nope123!'})
+expect('and the count started over, so this is still not a lockout',
+       patient.post('/profile/logging-key', json={'password': PASSWORD}).status_code, 200)
+
+# One user's lockout must not touch another's gate.
+expect("a lockout is per account, not global",
+       alice.post('/profile/logging-key', json={'password': PASSWORD}).status_code, 200)
+
 # ── Deleting is deliberately not gated ─────────────────────────────────
 # Worth asserting so the choice is visible rather than looking like an
 # oversight: a delete removes a trip, it cannot invent mileage.
@@ -224,5 +286,5 @@ if failures:
         print(f'  - {f}')
     sys.exit(1)
 
-print('Logging key check OK — generation, normalising, the password gate, '
-      'both write routes and rotation all hold.')
+print('Logging key check OK — generation, normalising, the password gate and '
+      'its throttle, both write routes and rotation all hold.')

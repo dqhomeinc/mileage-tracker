@@ -4,7 +4,7 @@ import json
 import os
 import re
 import secrets
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 import requests
 from dotenv import load_dotenv
 from itsdangerous import URLSafeTimedSerializer, SignatureExpired, BadSignature
@@ -101,6 +101,12 @@ class User(UserMixin, db.Model):
     # existed before this column; logging_key_for() mints one on first use
     # rather than a backfill over every row inside _migrate_db().
     logging_key = db.Column(db.String(32), nullable=True)
+    # Failed attempts at the password gate in front of the key, and the time
+    # that gate reopens. On the user row rather than in memory because Render
+    # restarts and may run more than one worker, either of which would reset an
+    # in-process counter and hand the attempts back.
+    key_reveal_fails = db.Column(db.Integer, nullable=True)
+    key_reveal_locked_until = db.Column(db.DateTime, nullable=True)
     # The business preselected when logging a new trip. Same reasoning as
     # default_vehicle_id above: a scalar here rather than a flag per row, so
     # only one business can be the default by construction.
@@ -330,6 +336,10 @@ def _migrate_db():
             conn.execute(db.text('ALTER TABLE "user" ADD COLUMN default_business_id INTEGER'))
         if 'logging_key' not in existing_user_cols:
             conn.execute(db.text('ALTER TABLE "user" ADD COLUMN logging_key VARCHAR(32)'))
+        if 'key_reveal_fails' not in existing_user_cols:
+            conn.execute(db.text('ALTER TABLE "user" ADD COLUMN key_reveal_fails INTEGER'))
+        if 'key_reveal_locked_until' not in existing_user_cols:
+            conn.execute(db.text('ALTER TABLE "user" ADD COLUMN key_reveal_locked_until TIMESTAMP'))
 
         conn.commit()
 
@@ -403,16 +413,71 @@ def check_logging_key(data):
     Compared with compare_digest rather than ==, so the comparison does not
     stop early on the first wrong character.
 
-    Deliberately not rate-limited. The code is eight characters from a
-    thirty-character alphabet, so guessing it over HTTP is not a threat worth
-    a lockout -- and a lockout here would stop a legitimate user logging their
-    trips, which is a worse outcome than the one it would prevent.
+    Deliberately not rate-limited *here*. The code is eight characters from a
+    thirty-character alphabet, so guessing it over HTTP is not a threat worth a
+    lockout, and a lockout on this route would stop a legitimate user logging
+    their trips -- a worse outcome than the one it would prevent.
+
+    The password gate in front of the key is throttled instead, which is where
+    the guessing is actually cheap; see _check_key_gate.
     """
     supplied = normalize_logging_key((data or {}).get('logging_key'))
     if not supplied:
         return 'Enter your logging key to save this trip. You can find it in your profile.'
     if not hmac.compare_digest(supplied, logging_key_for(current_user)):
         return 'That logging key is not correct. Check it in your profile and try again.'
+    return None
+
+
+# The password gate in front of the key is the only thing standing between a
+# session and the key, so it is the thing worth throttling -- not the key itself.
+# A guess at an eight-character key is hopeless; a guess at a password that is
+# weak or reused is not, and without a limit these two routes are an unlimited
+# password oracle for whoever already holds the session.
+#
+# A lockout is cheap here in a way it would not be on /log: it blocks looking
+# the key up, not logging trips, so a user who trips it can still work.
+LOGGING_KEY_MAX_ATTEMPTS = 5
+LOGGING_KEY_LOCKOUT = timedelta(minutes=15)
+
+
+def _utcnow():
+    """Naive UTC, matching how these columns are written and read.
+
+    datetime.utcnow() does the same thing but is deprecated from 3.12, and
+    storing an aware value would not survive the SQLite round trip as one.
+    """
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _check_key_gate(password):
+    """None if the password is right and the gate is open, else (message, status).
+
+    A correct password clears the count, so ordinary mistyping never
+    accumulates towards a lockout across days.
+    """
+    locked_until = current_user.key_reveal_locked_until
+    if locked_until and locked_until > _utcnow():
+        minutes = max(1, int((locked_until - _utcnow()).total_seconds() // 60) + 1)
+        return (f'Too many incorrect attempts. Try again in {minutes} minute'
+                f'{"" if minutes == 1 else "s"}.', 429)
+
+    if not current_user.check_password(password):
+        fails = (current_user.key_reveal_fails or 0) + 1
+        if fails >= LOGGING_KEY_MAX_ATTEMPTS:
+            current_user.key_reveal_locked_until = _utcnow() + LOGGING_KEY_LOCKOUT
+            current_user.key_reveal_fails = 0
+        else:
+            current_user.key_reveal_fails = fails
+        db.session.commit()
+        return ('Password is incorrect.', 403)
+
+    # Clearing an expired lockout here as well, so the row does not keep a stale
+    # timestamp that the branch above has to keep comparing against.
+    if current_user.key_reveal_fails or current_user.key_reveal_locked_until:
+        current_user.key_reveal_fails = 0
+        current_user.key_reveal_locked_until = None
+        db.session.commit()
     return None
 
 
@@ -425,10 +490,15 @@ def reveal_logging_key():
     session can already reach /log, so a code printed on the profile page could
     just be read off it. Behind the password, that script needs the password
     too -- at which point it is not the thing this was meant to stop.
+
+    Which means this route is where a guess is cheap, so it is throttled; the
+    key route is not. See _check_key_gate.
     """
     data = request.get_json(silent=True) or {}
-    if not current_user.check_password(data.get('password') or ''):
-        return jsonify({'error': 'Password is incorrect.'}), 403
+    refused = _check_key_gate(data.get('password') or '')
+    if refused:
+        message, status = refused
+        return jsonify({'error': message}), status
     return jsonify({'logging_key': format_logging_key(logging_key_for(current_user))})
 
 
@@ -441,8 +511,10 @@ def regenerate_logging_key():
     of logging trips until they look it up again.
     """
     data = request.get_json(silent=True) or {}
-    if not current_user.check_password(data.get('password') or ''):
-        return jsonify({'error': 'Password is incorrect.'}), 403
+    refused = _check_key_gate(data.get('password') or '')
+    if refused:
+        message, status = refused
+        return jsonify({'error': message}), status
     current_user.logging_key = generate_logging_key()
     db.session.commit()
     return jsonify({'logging_key': format_logging_key(current_user.logging_key)})
