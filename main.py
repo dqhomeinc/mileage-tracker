@@ -25,7 +25,44 @@ load_dotenv()
 
 app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-fallback-key')
+_database_url = os.environ.get('DATABASE_URL')
+
+# Deployed, as opposed to running from a local checkout or a check script.
+# Derived from configuration that already has to be correct for the app to work
+# at all, rather than a flag of its own that could be forgotten in exactly the
+# deployment it is meant to guard.
+#
+# A SQLite URL is local by definition -- it names a file on this machine, and
+# the scripts in .github/scripts point DATABASE_URL at a throwaway one. Only a
+# deployment has a real database server behind it. Testing merely whether
+# DATABASE_URL was set treated every one of those scripts as production.
+IS_DEPLOYED = bool(_database_url) and not _database_url.startswith('sqlite')
+
+# Signs session cookies, the "remember me" cookie and password-reset tokens. A
+# known value therefore lets anyone mint a session for any account and forge a
+# password reset for any address.
+#
+# This used to fall back to a constant written in this file, which is public. A
+# service created without the environment variable started anyway, looked
+# entirely healthy, and signed every cookie with a value anyone could read.
+#
+# The fallback is kept for local development, where there is nothing to protect
+# and requiring a secret would mean setup before `python main.py` runs at all.
+# Deployed, its absence is fatal instead: a failed deploy is obvious and fixed
+# in a minute, whereas a service running on a published key gives no signal.
+_secret_key = os.environ.get('SECRET_KEY')
+if not _secret_key:
+    if IS_DEPLOYED:
+        raise RuntimeError(
+            'SECRET_KEY is not set. It signs session cookies and password-reset '
+            'tokens, so starting without it would sign them with a value published '
+            'in this repository, letting anyone forge a session for any account. '
+            'Set SECRET_KEY in the Render dashboard (Environment) to a long random '
+            'value -- for example the output of '
+            '`python -c "import secrets; print(secrets.token_hex(32))"`.'
+        )
+    _secret_key = 'dev-only-key-never-deployed'
+app.config['SECRET_KEY'] = _secret_key
 
 MAX_PHOTO_BYTES = 2 * 1024 * 1024  # 2MB
 # Receipts are photographed on phones, where 2MB is a routine single image, so
@@ -43,7 +80,7 @@ app.config['MAX_CONTENT_LENGTH'] = max(MAX_PHOTO_BYTES, MAX_ATTACHMENT_BYTES) + 
 
 # Use PostgreSQL (via pg8000, pure-Python driver) when DATABASE_URL is set; SQLite locally.
 # pg8000 needs the +pg8000 dialect prefix and has no system library dependencies.
-_db_url = os.environ.get('DATABASE_URL') or 'sqlite:///mileage.db'
+_db_url = _database_url or 'sqlite:///mileage.db'
 if _db_url.startswith('postgres://'):
     _db_url = 'postgresql+pg8000://' + _db_url[len('postgres://'):]
 elif _db_url.startswith('postgresql://'):
