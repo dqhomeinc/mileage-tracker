@@ -263,6 +263,68 @@ expect('and the count started over, so this is still not a lockout',
 expect("a lockout is per account, not global",
        alice.post('/profile/logging-key', json={'password': PASSWORD}).status_code, 200)
 
+# ── The failure count is exact, not a read-modify-write ────────────────
+# The count is incremented inside one UPDATE. Done in Python instead -- read,
+# add one, write back -- a burst of parallel guesses would all read the same
+# value and all write the same value back, earning one counted failure per
+# burst rather than per request, and the lock might never engage.
+counted = make_user('counted')
+
+
+def gate_state(email):
+    with main.app.app_context():
+        row = main.User.query.filter_by(email=email).first()
+        return (row.key_reveal_fails or 0), row.key_reveal_locked_until
+
+
+for n in range(1, main.LOGGING_KEY_MAX_ATTEMPTS):
+    counted.post('/profile/logging-key', json={'password': 'Nope123!'})
+    expect(f'failure {n} is counted exactly once', gate_state('counted@example.com')[0], n)
+    expect(f'and the gate is still open after {n}', gate_state('counted@example.com')[1], None)
+
+counted.post('/profile/logging-key', json={'password': 'Nope123!'})
+fails, until = gate_state('counted@example.com')
+expect('the last failure engages the lock', until is not None, True)
+expect('and resets the count so the next window starts clean', fails, 0)
+
+# Fired concurrently, the lock must still engage. SQLite serialises writers, so
+# this does not reproduce a true interleaving -- but a single atomic UPDATE is
+# what makes the interleaving harmless, and this asserts the invariant that
+# would break if the increment went back to being read-modify-write.
+import threading  # noqa: E402
+
+burst = make_user('burst')
+burst_key = main.normalize_logging_key(
+    burst.post('/profile/logging-key', json={'password': PASSWORD}).get_json()['logging_key'])
+
+results = []
+lock = threading.Lock()
+
+
+def guess():
+    client = main.app.test_client()
+    client.post('/login', data={'email': 'burst@example.com', 'password': PASSWORD},
+                follow_redirects=True)
+    code = client.post('/profile/logging-key', json={'password': 'Nope123!'}).status_code
+    with lock:
+        results.append(code)
+
+
+threads = [threading.Thread(target=guess) for _ in range(main.LOGGING_KEY_MAX_ATTEMPTS)]
+for t in threads:
+    t.start()
+for t in threads:
+    t.join()
+
+expect('every concurrent guess was refused',
+       all(c in (403, 429) for c in results), True)
+expect('none of them revealed anything', any(c == 200 for c in results), False)
+_, burst_until = gate_state('burst@example.com')
+expect('and the lock engaged despite the guesses arriving together',
+       burst_until is not None, True)
+expect('while logging still works throughout',
+       burst.post('/log', json=trip_body(burst_key)).status_code, 200)
+
 # ── Deleting is deliberately not gated ─────────────────────────────────
 # Worth asserting so the choice is visible rather than looking like an
 # oversight: a delete removes a trip, it cannot invent mileage.

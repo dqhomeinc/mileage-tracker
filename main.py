@@ -450,34 +450,82 @@ def _utcnow():
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+def _key_gate_state():
+    """The gate columns as the database currently holds them.
+
+    Read with a column query rather than off current_user, because the counter
+    below is incremented in SQL: the loaded attribute is stale the moment it is.
+    """
+    row = (db.session.query(User.key_reveal_fails, User.key_reveal_locked_until)
+           .filter(User.id == current_user.id).one())
+    return (row[0] or 0), row[1]
+
+
+def _record_key_gate_failure():
+    """Count one failed attempt, locking the gate if that reaches the limit.
+
+    One UPDATE, which is the whole point. Reading the count into Python,
+    incrementing it and writing it back would let a burst of parallel guesses
+    all read the same value and all write the same value back -- so an attacker
+    sending N at a time would earn one counted failure per burst rather than
+    per request, and the lock might never engage at all. Deciding the new count
+    and the lock inside the statement leaves nothing to interleave.
+    """
+    nxt = db.func.coalesce(User.key_reveal_fails, 0) + 1
+    reached = nxt >= LOGGING_KEY_MAX_ATTEMPTS
+    db.session.execute(
+        db.update(User)
+        .where(User.id == current_user.id)
+        .values(
+            # Reset to zero as the lock goes on, so the next window starts clean.
+            key_reveal_fails=db.case((reached, 0), else_=nxt),
+            key_reveal_locked_until=db.case(
+                (reached, _utcnow() + LOGGING_KEY_LOCKOUT),
+                else_=User.key_reveal_locked_until,
+            ),
+        )
+    )
+    db.session.commit()
+
+
+def _clear_key_gate():
+    """Forget the failures, and any lock that has expired."""
+    db.session.execute(
+        db.update(User)
+        .where(User.id == current_user.id)
+        .values(key_reveal_fails=0, key_reveal_locked_until=None)
+    )
+    db.session.commit()
+
+
 def _check_key_gate(password):
     """None if the password is right and the gate is open, else (message, status).
 
     A correct password clears the count, so ordinary mistyping never
     accumulates towards a lockout across days.
+
+    Requests already in flight when the lock engages are not stopped -- the
+    check and the lock cannot be one statement when a password hash has to be
+    verified between them. The count itself is exact, so the lock engages after
+    the right number of failures regardless of how they were spread out, which
+    is what bounds the guessing.
     """
-    locked_until = current_user.key_reveal_locked_until
-    if locked_until and locked_until > _utcnow():
-        minutes = max(1, int((locked_until - _utcnow()).total_seconds() // 60) + 1)
+    _, locked_until = _key_gate_state()
+    now = _utcnow()
+    if locked_until and locked_until > now:
+        minutes = max(1, int((locked_until - now).total_seconds() // 60) + 1)
         return (f'Too many incorrect attempts. Try again in {minutes} minute'
                 f'{"" if minutes == 1 else "s"}.', 429)
 
     if not current_user.check_password(password):
-        fails = (current_user.key_reveal_fails or 0) + 1
-        if fails >= LOGGING_KEY_MAX_ATTEMPTS:
-            current_user.key_reveal_locked_until = _utcnow() + LOGGING_KEY_LOCKOUT
-            current_user.key_reveal_fails = 0
-        else:
-            current_user.key_reveal_fails = fails
-        db.session.commit()
+        _record_key_gate_failure()
         return ('Password is incorrect.', 403)
 
-    # Clearing an expired lockout here as well, so the row does not keep a stale
+    # Clearing an expired lock here too, so the row does not keep a stale
     # timestamp that the branch above has to keep comparing against.
-    if current_user.key_reveal_fails or current_user.key_reveal_locked_until:
-        current_user.key_reveal_fails = 0
-        current_user.key_reveal_locked_until = None
-        db.session.commit()
+    fails, locked_until = _key_gate_state()
+    if fails or locked_until:
+        _clear_key_gate()
     return None
 
 
