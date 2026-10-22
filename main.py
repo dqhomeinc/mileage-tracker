@@ -159,6 +159,26 @@ class User(UserMixin, db.Model):
         return check_password_hash(self.password_hash, password)
 
 
+class LoginAttempt(db.Model):
+    """One failed sign-in, kept just long enough to rate-limit the next one.
+
+    A table rather than an in-memory counter because the free tier spins the
+    instance down after a few minutes idle, which would hand every attempt
+    straight back. Rows are pruned on write, so this stays small: only
+    failures within the window are ever of interest.
+
+    Deliberately not a foreign key to User. Attempts against an address that
+    has no account have to be counted too, or the limit could be sidestepped by
+    guessing addresses, and they are the attempts an attacker makes most.
+    """
+    id = db.Column(db.Integer, primary_key=True)
+    # 45 characters is the longest an IPv6 address can be, including a mapped
+    # IPv4 suffix. Nullable because remote_addr can be absent.
+    ip = db.Column(db.String(45), nullable=True, index=True)
+    email = db.Column(db.String(120), nullable=True, index=True)
+    created_at = db.Column(db.DateTime, nullable=False, index=True)
+
+
 class Vehicle(db.Model):
     id      = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
@@ -1074,6 +1094,81 @@ def register():
 _ABSENT_USER_HASH = generate_password_hash('password-for-no-account')
 
 
+# Bounding how many passwords can be tried. Without this the password is not a
+# boundary at all, only slow: scrypt costs tens of milliseconds a guess, which
+# hinders an attacker and does not stop one.
+#
+# Two counters over the same window. The address limit is the effective control
+# for the ordinary case -- a script hammering the form from one place -- and the
+# email limit is what remains if attempts are spread across many addresses.
+#
+# The email limit has a cost worth naming: someone who knows an address can
+# spend failures against it deliberately and keep its owner out for the window.
+# That is why it is the looser of the two. It bounds distributed guessing
+# without being cheap to weaponise, and a 15-minute window keeps the worst case
+# short.
+LOGIN_ATTEMPT_WINDOW = timedelta(minutes=15)
+LOGIN_MAX_PER_IP = 20
+LOGIN_MAX_PER_EMAIL = 10
+
+# No delay-based throttling anywhere here, deliberately. The app runs under a
+# single synchronous gunicorn worker, so sleeping inside a request blocks every
+# other request in the process -- a progressive delay would be a denial of
+# service against the whole app rather than against the attempt.
+
+
+def _login_attempts_exceeded(ip, email):
+    """Whether this address or this email has failed too often lately."""
+    since = _utcnow() - LOGIN_ATTEMPT_WINDOW
+    if ip:
+        by_ip = (db.session.query(db.func.count(LoginAttempt.id))
+                 .filter(LoginAttempt.ip == ip, LoginAttempt.created_at >= since)
+                 .scalar() or 0)
+        if by_ip >= LOGIN_MAX_PER_IP:
+            return True
+    if email:
+        by_email = (db.session.query(db.func.count(LoginAttempt.id))
+                    .filter(LoginAttempt.email == email, LoginAttempt.created_at >= since)
+                    .scalar() or 0)
+        if by_email >= LOGIN_MAX_PER_EMAIL:
+            return True
+    return False
+
+
+def _record_login_failure(ip, email):
+    """Count one failure, and drop the ones too old to matter.
+
+    Pruning here rather than on a schedule: there is nowhere to run a schedule,
+    and a write is exactly when the table has grown.
+    """
+    db.session.add(LoginAttempt(ip=ip, email=email, created_at=_utcnow()))
+    db.session.query(LoginAttempt).filter(
+        LoginAttempt.created_at < _utcnow() - LOGIN_ATTEMPT_WINDOW
+    ).delete(synchronize_session=False)
+    db.session.commit()
+
+
+def _clear_login_failures(email):
+    """Forget this email's failures after a successful sign-in.
+
+    So that someone who mistypes a few times and then gets it right is not
+    carrying those failures towards a limit for the rest of the window.
+
+    Only the email. Clearing the address's failures as well would hand the IP
+    budget back on demand: anyone with an account of their own could guess
+    nineteen times at other addresses, sign in to their own to reset the count,
+    and repeat for ever -- so the address limit would never engage at all. It is
+    a budget per window, and a success is not a refund. Behind a shared address
+    it would also have erased other people's failures.
+    """
+    if not email:
+        return
+    (db.session.query(LoginAttempt)
+     .filter(LoginAttempt.email == email)
+     .delete(synchronize_session=False))
+    db.session.commit()
+
+
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if current_user.is_authenticated:
@@ -1082,6 +1177,18 @@ def login():
         email = request.form.get('email', '').strip().lower()
         password = request.form.get('password', '')
         remember = request.form.get('remember') == '1'
+        ip = request.remote_addr
+
+        # Checked before the password, so a limited attempt costs no scrypt.
+        # The message is shown whether or not the address has an account, so it
+        # reveals nothing that the shared failure message below does not --
+        # saying "too many attempts" only for real accounts would put the
+        # enumeration leak straight back.
+        if _login_attempts_exceeded(ip, email):
+            flash('Too many sign-in attempts. Please wait a few minutes and try again.',
+                  'danger')
+            return render_template('login.html')
+
         user = User.query.filter_by(email=email).first()
         # Exactly one password hash either way. Checking the real one only when
         # a user exists, and a throwaway otherwise, is what keeps the two cases
@@ -1094,8 +1201,11 @@ def login():
             authenticated = False
 
         if authenticated:
+            _clear_login_failures(email)
             login_user(user, remember=remember)
             return redirect(url_for('index'))
+
+        _record_login_failure(ip, email)
 
         # One message for both failures. Saying "no account is associated with
         # that email" confirmed which addresses are registered here, which turns
