@@ -64,6 +64,28 @@ if not _secret_key:
     _secret_key = 'dev-only-key-never-deployed'
 app.config['SECRET_KEY'] = _secret_key
 
+# Session cookie hardening. The cookie is a bearer credential -- whoever holds
+# it is logged in -- so these are about limiting where it travels.
+#
+# HttpOnly is already Flask's default; set here so all three sit together and a
+# future change has to remove it deliberately rather than by inheriting a
+# different default.
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+
+# Lax, not Strict. Browsers already default an unset attribute to Lax, so this
+# states the intent rather than relying on that, and both block the cookie from
+# cross-site POSTs. Strict would additionally withhold it on a top-level
+# navigation from anywhere else -- following a link to this app from an email
+# would arrive logged out and send the user back to the login form.
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+
+# Secure only where there is TLS to require. Render redirects HTTP to HTTPS, but
+# the browser attaches the cookie to that first plaintext request, before the
+# redirect comes back -- so without this the session can be read off the wire by
+# anyone on the network path. Conditional because setting it locally would mean
+# the cookie is never stored over http://localhost and nobody could sign in.
+app.config['SESSION_COOKIE_SECURE'] = IS_DEPLOYED
+
 MAX_PHOTO_BYTES = 2 * 1024 * 1024  # 2MB
 # Receipts are photographed on phones, where 2MB is a routine single image, so
 # attachments get their own larger ceiling. Both counts are enforced per file
