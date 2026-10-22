@@ -114,15 +114,46 @@ expect('one address making many attempts is limited', LIMITED in ip_limited, Tru
 elsewhere = attempt('bob@example.com', PASSWORD, ip='203.0.113.100')
 expect('while a different address is unaffected', LIMITED in elsewhere, False)
 
-# ── A success clears the count ─────────────────────────────────────────
+# ── A success clears that email's count, and only that ───────────────
 reset()
 for i in range(main.LOGIN_MAX_PER_EMAIL - 1):
     attempt('bob@example.com', WRONG, ip='203.0.113.50')
+# A failure against a different address from the same place, which must survive.
+attempt('someone-else@example.com', WRONG, ip='203.0.113.50')
 ok = attempt('bob@example.com', PASSWORD, ip='203.0.113.50')
 expect('signing in correctly after some misses works', LIMITED in ok, False)
 with main.app.app_context():
-    left = main.db.session.query(main.LoginAttempt).count()
-expect('and clears the recorded failures so they do not accumulate', left, 0)
+    mine = (main.db.session.query(main.LoginAttempt)
+            .filter(main.LoginAttempt.email == 'bob@example.com').count())
+    others = (main.db.session.query(main.LoginAttempt)
+              .filter(main.LoginAttempt.email != 'bob@example.com').count())
+expect("and clears that email's failures so they do not accumulate", mine, 0)
+expect('while leaving failures against other addresses from the same place',
+       others, 1)
+
+# ── A success must not refund the address budget ─────────────────────
+# The attack this prevents: someone with an account of their own guesses up to
+# the address limit, signs in to their own account to reset the count, and
+# repeats, so the address limit never engages. A success clears the email's
+# failures, not the address's, which is what closes it.
+reset()
+ATTACKER_IP = '203.0.113.123'
+for cycle in range(3):
+    for i in range(main.LOGIN_MAX_PER_EMAIL - 1):
+        attempt(f'victim{cycle}-{i}@example.com', WRONG, ip=ATTACKER_IP)
+    # Their own account, correct password, from the same address.
+    attempt('bob@example.com', PASSWORD, ip=ATTACKER_IP)
+
+after_cycles = attempt('one-more@example.com', WRONG, ip=ATTACKER_IP)
+expect('guessing cannot be resumed indefinitely by signing in between rounds',
+       LIMITED in after_cycles, True)
+with main.app.app_context():
+    budget = (main.db.session.query(main.LoginAttempt)
+              .filter(main.LoginAttempt.ip == ATTACKER_IP).count())
+if budget < main.LOGIN_MAX_PER_IP:
+    failures.append(f'only {budget} attempts are counted against the address after '
+                    f'{3 * (main.LOGIN_MAX_PER_EMAIL - 1)} guesses, so signing in '
+                    'between rounds is refunding the address budget')
 
 # ── Old attempts stop counting, and are pruned ────────────────────────
 reset()
