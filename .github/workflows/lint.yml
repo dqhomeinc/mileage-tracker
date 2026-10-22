@@ -1,8 +1,12 @@
 name: Lint
 
 on:
+  # Deliberately not filtered to `branches: [main]`. A pull request that targets
+  # another feature branch -- the second half of a stacked pair -- matched no
+  # trigger at all and ran no checks whatsoever, which is worse than it sounds:
+  # the PR showed a clean, empty check list rather than a warning, so a stack
+  # looked reviewed when nothing had run against it.
   pull_request:
-    branches: [main]
     types: [opened, synchronize, reopened]
 
 jobs:
