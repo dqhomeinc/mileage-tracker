@@ -90,6 +90,23 @@ jobs:
       - name: Check the SECRET_KEY startup guard
         run: python .github/scripts/check_secret_key.py
 
+  # The session cookie is a bearer credential, and all three of its attributes
+  # were previously left to defaults -- which for Secure means off, so the
+  # cookie could be read off the wire. Secure has to be conditional (set when
+  # deployed, unset locally, or nobody can sign in over http://localhost), so
+  # this job covers the local arm and the postgres job below covers the other.
+  cookie-flags:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Check the session cookie flags (local arm)
+        run: python .github/scripts/check_cookie_flags.py
+
   # CI has no DATABASE_URL, so a plain `import app` always falls back to
   # SQLite and never exercises the pg8000 connection or the Postgres branch
   # of _migrate_db() — both of which production actually depends on.
@@ -124,6 +141,13 @@ jobs:
           # does; nothing here signs anything that outlives the job.
           SECRET_KEY: integration-check-not-a-real-secret
         run: python -c "import app"
+      # IS_DEPLOYED is true here, so this run asserts the Secure arm that the
+      # cookie-flags job above cannot reach.
+      - name: Check the session cookie flags (deployed arm)
+        env:
+          DATABASE_URL: postgresql://testuser:testpass@localhost:5432/testdb
+          SECRET_KEY: integration-check-not-a-real-secret
+        run: python .github/scripts/check_cookie_flags.py
       # The logging-key job runs this against SQLite. The gate's failure
       # counter is a single UPDATE with a CASE on each column, and SQLite
       # serialises writers — so the concurrent part of that check only asserts
