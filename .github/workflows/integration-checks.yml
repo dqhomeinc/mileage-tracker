@@ -74,6 +74,22 @@ jobs:
       - name: Check the per-user logging key
         run: python .github/scripts/check_logging_key.py
 
+  # SECRET_KEY signs session cookies and password-reset tokens. When it was
+  # absent the app fell back to a constant in main.py -- a public file -- and
+  # started anyway, looking healthy. The guard against that has to hold in three
+  # directions at once, and every one of them fails quietly rather than loudly.
+  secret-key-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Check the SECRET_KEY startup guard
+        run: python .github/scripts/check_secret_key.py
+
   # CI has no DATABASE_URL, so a plain `import app` always falls back to
   # SQLite and never exercises the pg8000 connection or the Postgres branch
   # of _migrate_db() — both of which production actually depends on.
@@ -103,6 +119,10 @@ jobs:
       - name: Import against real Postgres
         env:
           DATABASE_URL: postgresql://testuser:testpass@localhost:5432/testdb
+          # Required now that a deployed app refuses to start without one, and
+          # DATABASE_URL being set is what marks this as deployed. Any value
+          # does; nothing here signs anything that outlives the job.
+          SECRET_KEY: integration-check-not-a-real-secret
         run: python -c "import app"
       # The logging-key job runs this against SQLite. The gate's failure
       # counter is a single UPDATE with a CASE on each column, and SQLite
