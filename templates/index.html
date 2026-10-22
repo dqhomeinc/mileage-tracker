@@ -403,6 +403,19 @@
     }
     .form-input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(79,70,229,.12); }
     .vehicle-hint { font-size: .75rem; color: var(--muted); margin-top: 4px; min-height: 16px; }
+    /* The logging key is eight characters read off the profile page and typed
+       back, so it gets a monospace field wide enough to see all of them and
+       letter-spacing that makes the groups countable. */
+    .key-input {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      letter-spacing: .14em; text-transform: uppercase;
+    }
+    .key-input::placeholder { letter-spacing: .08em; text-transform: none; }
+    .key-field-row { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+    .key-help-link {
+      font-size: .72rem; color: var(--primary); text-decoration: none; white-space: nowrap;
+    }
+    .key-help-link:hover { text-decoration: underline; }
     .trip-notes {
       width: 100%; box-sizing: border-box; resize: vertical;
       min-height: 58px; font-family: 'Inter', sans-serif;
@@ -576,6 +589,17 @@
       </div>
     </div>
 
+    <div style="margin-bottom:14px">
+      <div class="key-field-row">
+        <label class="field-label" for="tripLoggingKey">Logging Key</label>
+        <a class="key-help-link" href="/profile" target="_blank" rel="noopener">Where do I find this?</a>
+      </div>
+      <input type="text" id="tripLoggingKey" class="form-input key-input"
+             maxlength="9" autocomplete="off" autocapitalize="characters"
+             spellcheck="false" placeholder="ABCD-2345">
+      <div class="vehicle-hint" id="tripLoggingKeyHint"></div>
+    </div>
+
     <button id="logTripBtn" class="btn-calc">
       <i class="fas fa-plus-circle"></i> Log Trip
     </button>
@@ -717,6 +741,15 @@
     <div class="speed-warning" id="editPlaceWarning">
       <i class="fas fa-location-dot"></i>
       <span id="editPlaceWarningText"></span>
+    </div>
+    <div class="modal-field">
+      <div class="key-field-row">
+        <label for="editLoggingKey" style="margin-bottom:0">Logging Key</label>
+        <a class="key-help-link" href="/profile" target="_blank" rel="noopener">Where do I find this?</a>
+      </div>
+      <input type="text" id="editLoggingKey" class="key-input"
+             maxlength="9" autocomplete="off" autocapitalize="characters"
+             spellcheck="false" placeholder="ABCD-2345">
     </div>
     </div>
     <div class="modal-footer">
@@ -2663,6 +2696,19 @@ document.getElementById('logTripBtn').addEventListener('click', async () => {
                                        document.getElementById('tripDate').value);
   if (endDateError) { showError(endDateError); return; }
 
+  // Checked before the measurement, not after: making the user wait on a
+  // Routes call to then be told the key is missing is a worse order.
+  const loggingKey = loggingKeyValue('tripLoggingKey');
+  const keyHint = document.getElementById('tripLoggingKeyHint');
+  keyHint.textContent = '';
+  if (loggingKey.length !== LOGGING_KEY_LENGTH) {
+    keyHint.textContent = loggingKey
+      ? `Your logging key is ${LOGGING_KEY_LENGTH} characters. Check it in your profile.`
+      : 'Enter your logging key to log this trip. You can find it in your profile.';
+    document.getElementById('tripLoggingKey').focus();
+    return;
+  }
+
   const btn = document.getElementById('logTripBtn');
   btn.disabled = true;
 
@@ -2691,6 +2737,7 @@ document.getElementById('logTripBtn').addEventListener('click', async () => {
   const payload = {
     ...route,
     ...measured,
+    logging_key: loggingKey,
     vehicle_id: vehicleVal ? parseInt(vehicleVal) : null,
     business_id: businessVal ? parseInt(businessVal) : null,
     notes:      document.getElementById('tripNotes').value,
@@ -2737,6 +2784,9 @@ document.getElementById('logTripBtn').addEventListener('click', async () => {
     applyDefaultBusiness();
     document.getElementById('tripNotes').value = '';
     document.getElementById('tripNotesCounter').textContent = '';
+    // Cleared with everything else: the next trip is a separate act and has to
+    // be keyed again, which is the whole point of the field.
+    document.getElementById('tripLoggingKey').value = '';
     document.getElementById('tripDate').value      = '';
     document.getElementById('tripEndDate').value   = '';
     document.getElementById('tripEndDate')._userSet = false;
@@ -2938,6 +2988,41 @@ function updateTotalDisplay() {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
+// ─── Logging key ────────────────────────────────────────────────────────────
+// Typed on every log and every edit, by design: the point is that a trip is
+// entered by a person, so a value kept around between trips would defeat it.
+// Nothing here is a security check -- the server compares the key and is the
+// only thing that can -- this only avoids a round trip for an obviously empty
+// or half-typed field, and keeps what is sent tidy.
+
+const LOGGING_KEY_LENGTH = 8;
+
+// Matches normalize_logging_key() in main.py: case and separators do not
+// matter, so a key pasted as "abcd 2345" is the same key.
+function normalizeLoggingKey(value) {
+  return (value || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
+
+function loggingKeyValue(inputId) {
+  return normalizeLoggingKey(document.getElementById(inputId).value);
+}
+
+// Groups the key as the profile page shows it, while it is being typed, so the
+// two read the same. The caret is left at the end: this only ever runs on a
+// field the user is appending to, and the field is eight characters long.
+function wireLoggingKeyInput(inputId) {
+  const el = document.getElementById(inputId);
+  if (!el) return;
+  el.addEventListener('input', () => {
+    const raw = normalizeLoggingKey(el.value).slice(0, LOGGING_KEY_LENGTH);
+    const half = LOGGING_KEY_LENGTH / 2;
+    el.value = raw.length > half ? `${raw.slice(0, half)}-${raw.slice(half)}` : raw;
+  });
+}
+
+wireLoggingKeyInput('tripLoggingKey');
+wireLoggingKeyInput('editLoggingKey');
+
 function showError(msg) {
   const el = document.getElementById('errorAlert');
   document.getElementById('errorMsg').textContent = msg;
@@ -3110,6 +3195,16 @@ async function saveEdit() {
                                        document.getElementById('editTripDate').value);
   if (endDateError) { alert(endDateError); return; }
 
+  // Before the recalculation below, for the same reason as in the log form.
+  const loggingKey = loggingKeyValue('editLoggingKey');
+  if (loggingKey.length !== LOGGING_KEY_LENGTH) {
+    alert(loggingKey
+      ? `Your logging key is ${LOGGING_KEY_LENGTH} characters. Check it in your profile.`
+      : 'Enter your logging key to save this edit. You can find it in your profile.');
+    document.getElementById('editLoggingKey').focus();
+    return;
+  }
+
   const btn = document.getElementById('saveEditBtn');
 
   // The distance in editingTrip is only valid for the route it was last
@@ -3154,6 +3249,7 @@ async function saveEdit() {
   const businessVal = document.getElementById('editBusiness').value;
   const payload = {
     ...route,
+    logging_key: loggingKey,
     distance_miles: editingTrip.miles,
     duration_seconds: editingTrip.durationSeconds,
     vehicle_id: vehicleVal ? parseInt(vehicleVal) : null,

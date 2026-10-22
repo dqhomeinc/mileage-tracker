@@ -1,8 +1,10 @@
 import base64
+import hmac
 import json
 import os
 import re
-from datetime import datetime, date, timedelta
+import secrets
+from datetime import datetime, date, timedelta, timezone
 import requests
 from dotenv import load_dotenv
 from itsdangerous import URLSafeTimedSerializer, SignatureExpired, BadSignature
@@ -95,6 +97,16 @@ class User(UserMixin, db.Model):
     # in _migrate_db() can't add a constraint. Ownership is checked in the route
     # and delete_vehicle() clears it, so a stale id can't outlive its vehicle.
     default_vehicle_id = db.Column(db.Integer, nullable=True)
+    # The code the user types to log or edit a trip. Null for accounts that
+    # existed before this column; logging_key_for() mints one on first use
+    # rather than a backfill over every row inside _migrate_db().
+    logging_key = db.Column(db.String(32), nullable=True)
+    # Failed attempts at the password gate in front of the key, and the time
+    # that gate reopens. On the user row rather than in memory because Render
+    # restarts and may run more than one worker, either of which would reset an
+    # in-process counter and hand the attempts back.
+    key_reveal_fails = db.Column(db.Integer, nullable=True)
+    key_reveal_locked_until = db.Column(db.DateTime, nullable=True)
     # The business preselected when logging a new trip. Same reasoning as
     # default_vehicle_id above: a scalar here rather than a flag per row, so
     # only one business can be the default by construction.
@@ -322,8 +334,249 @@ def _migrate_db():
             conn.execute(db.text('ALTER TABLE "user" ADD COLUMN default_vehicle_id INTEGER'))
         if 'default_business_id' not in existing_user_cols:
             conn.execute(db.text('ALTER TABLE "user" ADD COLUMN default_business_id INTEGER'))
+        if 'logging_key' not in existing_user_cols:
+            conn.execute(db.text('ALTER TABLE "user" ADD COLUMN logging_key VARCHAR(32)'))
+        if 'key_reveal_fails' not in existing_user_cols:
+            conn.execute(db.text('ALTER TABLE "user" ADD COLUMN key_reveal_fails INTEGER'))
+        if 'key_reveal_locked_until' not in existing_user_cols:
+            conn.execute(db.text('ALTER TABLE "user" ADD COLUMN key_reveal_locked_until TIMESTAMP'))
 
         conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Per-user logging key
+# ---------------------------------------------------------------------------
+#
+# A short code the user has to type to log or edit a trip, to stop trips being
+# written by a script rather than a person.
+#
+# What this does and does not do is worth being exact about, because the shape
+# of it invites being read as more than it is. It is not an authentication
+# factor. The goal is that logging cannot be automated *incidentally* -- only
+# by a user who deliberately hands their own key to a script, which is a choice
+# they have made rather than something that falls out of the app being easy to
+# POST to.
+#
+# So: it stops a script that simply POSTs to /log, because the code is nowhere
+# in the page it would be scraping. It would not stop a script driving a stolen
+# session either -- except that the code is deliberately not printed on the
+# profile page; revealing it costs the account password (see
+# reveal_logging_key), so reading it off the profile is not something a session
+# alone can do. And it does not stop the account holder giving the code to
+# their own script, which nothing held by the user ever could. That last case
+# is accepted: it makes automation a deliberate act instead of a free one.
+#
+# The code is required on every log and every edit for the same reason. A value
+# cached between trips would make the first entry the deliberate act and every
+# trip after it free again.
+
+LOGGING_KEY_LENGTH = 8
+
+# No I, L, O, U, 0 or 1. The code is read off a screen and typed back, and
+# those are the characters that get read back wrong.
+_LOGGING_KEY_ALPHABET = 'ABCDEFGHJKMNPQRSTVWXYZ23456789'
+
+_LOGGING_KEY_STRIP = re.compile(r'[^A-Z0-9]')
+
+
+def generate_logging_key():
+    return ''.join(secrets.choice(_LOGGING_KEY_ALPHABET) for _ in range(LOGGING_KEY_LENGTH))
+
+
+def normalize_logging_key(value):
+    """What the user typed, reduced to what is actually compared.
+
+    The code is shown grouped ("ABCD-2345") and will be typed back with or
+    without the dash, in either case, and often with a stray space from a
+    copy-paste. Those are all the same code, and refusing them would read as
+    the feature being broken.
+    """
+    return _LOGGING_KEY_STRIP.sub('', (value or '').upper())
+
+
+def format_logging_key(key):
+    """The code as it is displayed: one dash in the middle, which is most of
+    why anyone copies eight characters correctly."""
+    if not key:
+        return ''
+    half = LOGGING_KEY_LENGTH // 2
+    return f'{key[:half]}-{key[half:]}'
+
+
+def logging_key_for(user):
+    """The user's code, minted on first use.
+
+    Accounts that existed before the column have none, and backfilling them
+    would mean a write over every row inside _migrate_db(). Minting on the
+    first read keeps the migration to one ALTER TABLE, at the cost of this
+    function being the only way the rest of the app should read the column.
+    """
+    if not user.logging_key:
+        user.logging_key = generate_logging_key()
+        db.session.commit()
+    return user.logging_key
+
+
+def check_logging_key(data):
+    """None if the request carried the right code, else the message to return.
+
+    Compared with compare_digest rather than ==, so the comparison does not
+    stop early on the first wrong character.
+
+    Deliberately not rate-limited *here*. The code is eight characters from a
+    thirty-character alphabet, so guessing it over HTTP is not a threat worth a
+    lockout, and a lockout on this route would stop a legitimate user logging
+    their trips -- a worse outcome than the one it would prevent.
+
+    The password gate in front of the key is throttled instead, which is where
+    the guessing is actually cheap; see _check_key_gate.
+    """
+    supplied = normalize_logging_key((data or {}).get('logging_key'))
+    if not supplied:
+        return 'Enter your logging key to save this trip. You can find it in your profile.'
+    if not hmac.compare_digest(supplied, logging_key_for(current_user)):
+        return 'That logging key is not correct. Check it in your profile and try again.'
+    return None
+
+
+# The password gate in front of the key is the only thing standing between a
+# session and the key, so it is the thing worth throttling -- not the key itself.
+# A guess at an eight-character key is hopeless; a guess at a password that is
+# weak or reused is not, and without a limit these two routes are an unlimited
+# password oracle for whoever already holds the session.
+#
+# A lockout is cheap here in a way it would not be on /log: it blocks looking
+# the key up, not logging trips, so a user who trips it can still work.
+LOGGING_KEY_MAX_ATTEMPTS = 5
+LOGGING_KEY_LOCKOUT = timedelta(minutes=15)
+
+
+def _utcnow():
+    """Naive UTC, matching how these columns are written and read.
+
+    datetime.utcnow() does the same thing but is deprecated from 3.12, and
+    storing an aware value would not survive the SQLite round trip as one.
+    """
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _key_gate_state():
+    """The gate columns as the database currently holds them.
+
+    Read with a column query rather than off current_user, because the counter
+    below is incremented in SQL: the loaded attribute is stale the moment it is.
+    """
+    row = (db.session.query(User.key_reveal_fails, User.key_reveal_locked_until)
+           .filter(User.id == current_user.id).one())
+    return (row[0] or 0), row[1]
+
+
+def _record_key_gate_failure():
+    """Count one failed attempt, locking the gate if that reaches the limit.
+
+    One UPDATE, which is the whole point. Reading the count into Python,
+    incrementing it and writing it back would let a burst of parallel guesses
+    all read the same value and all write the same value back -- so an attacker
+    sending N at a time would earn one counted failure per burst rather than
+    per request, and the lock might never engage at all. Deciding the new count
+    and the lock inside the statement leaves nothing to interleave.
+    """
+    nxt = db.func.coalesce(User.key_reveal_fails, 0) + 1
+    reached = nxt >= LOGGING_KEY_MAX_ATTEMPTS
+    db.session.execute(
+        db.update(User)
+        .where(User.id == current_user.id)
+        .values(
+            # Reset to zero as the lock goes on, so the next window starts clean.
+            key_reveal_fails=db.case((reached, 0), else_=nxt),
+            key_reveal_locked_until=db.case(
+                (reached, _utcnow() + LOGGING_KEY_LOCKOUT),
+                else_=User.key_reveal_locked_until,
+            ),
+        )
+    )
+    db.session.commit()
+
+
+def _clear_key_gate():
+    """Forget the failures, and any lock that has expired."""
+    db.session.execute(
+        db.update(User)
+        .where(User.id == current_user.id)
+        .values(key_reveal_fails=0, key_reveal_locked_until=None)
+    )
+    db.session.commit()
+
+
+def _check_key_gate(password):
+    """None if the password is right and the gate is open, else (message, status).
+
+    A correct password clears the count, so ordinary mistyping never
+    accumulates towards a lockout across days.
+
+    Requests already in flight when the lock engages are not stopped -- the
+    check and the lock cannot be one statement when a password hash has to be
+    verified between them. The count itself is exact, so the lock engages after
+    the right number of failures regardless of how they were spread out, which
+    is what bounds the guessing.
+    """
+    _, locked_until = _key_gate_state()
+    now = _utcnow()
+    if locked_until and locked_until > now:
+        minutes = max(1, int((locked_until - now).total_seconds() // 60) + 1)
+        return (f'Too many incorrect attempts. Try again in {minutes} minute'
+                f'{"" if minutes == 1 else "s"}.', 429)
+
+    if not current_user.check_password(password):
+        _record_key_gate_failure()
+        return ('Password is incorrect.', 403)
+
+    # Clearing an expired lock here too, so the row does not keep a stale
+    # timestamp that the branch above has to keep comparing against.
+    fails, locked_until = _key_gate_state()
+    if fails or locked_until:
+        _clear_key_gate()
+    return None
+
+
+@app.route('/profile/logging-key', methods=['POST'])
+@login_required
+def reveal_logging_key():
+    """The code, shown only once the account password is re-entered.
+
+    This is what makes the code worth having at all. A script driving a stolen
+    session can already reach /log, so a code printed on the profile page could
+    just be read off it. Behind the password, that script needs the password
+    too -- at which point it is not the thing this was meant to stop.
+
+    Which means this route is where a guess is cheap, so it is throttled; the
+    key route is not. See _check_key_gate.
+    """
+    data = request.get_json(silent=True) or {}
+    refused = _check_key_gate(data.get('password') or '')
+    if refused:
+        message, status = refused
+        return jsonify({'error': message}), status
+    return jsonify({'logging_key': format_logging_key(logging_key_for(current_user))})
+
+
+@app.route('/profile/logging-key', methods=['PUT'])
+@login_required
+def regenerate_logging_key():
+    """A fresh code, which immediately invalidates the old one.
+
+    Also behind the password: rotating someone's code is a way to lock them out
+    of logging trips until they look it up again.
+    """
+    data = request.get_json(silent=True) or {}
+    refused = _check_key_gate(data.get('password') or '')
+    if refused:
+        message, status = refused
+        return jsonify({'error': message}), status
+    current_user.logging_key = generate_logging_key()
+    db.session.commit()
+    return jsonify({'logging_key': format_logging_key(current_user.logging_key)})
 
 
 # ---------------------------------------------------------------------------
@@ -990,6 +1243,12 @@ def _resolve_business(business_id):
 @login_required
 def log_trip():
     data = request.get_json()
+    # Before anything else, including the distance lookup: a request without
+    # the key should not be able to spend a Routes call.
+    key_error = check_logging_key(data)
+    if key_error:
+        return jsonify({'error': key_error}), 403
+
     start = (data.get('start') or '').strip()
     end   = (data.get('end')   or '').strip()
     if not start or not end:
@@ -1117,6 +1376,10 @@ def update_trip(trip_id):
     if not trip:
         return jsonify({'error': 'Trip not found.'}), 404
     data           = request.get_json()
+    key_error      = check_logging_key(data)
+    if key_error:
+        return jsonify({'error': key_error}), 403
+
     start          = (data.get('start') or '').strip()
     end            = (data.get('end')   or '').strip()
     distance_miles = data.get('distance_miles')

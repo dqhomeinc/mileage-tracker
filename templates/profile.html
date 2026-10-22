@@ -117,6 +117,34 @@
     .btn-save:hover { opacity: .9; }
     .btn-save:disabled { opacity: .6; cursor: not-allowed; }
 
+    .key-display {
+      display: flex; align-items: center; gap: 10px;
+      padding: 12px 14px; border-radius: var(--radius-sm);
+      background: #F8FAFC; border: 1.5px dashed var(--border);
+      margin-bottom: 14px;
+    }
+    .key-value {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 1.05rem; font-weight: 600; letter-spacing: .08em;
+      color: var(--text); flex: 1;
+    }
+    .key-value.hidden-key { color: var(--muted); letter-spacing: .14em; font-weight: 500; }
+    .key-note { font-size: .8rem; color: var(--muted); line-height: 1.5; margin-bottom: 14px; }
+    .key-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+    .btn-ghost {
+      padding: 10px 16px; border-radius: var(--radius-sm);
+      background: white; border: 1.5px solid var(--border); color: var(--text);
+      font-size: .88rem; font-weight: 600; cursor: pointer;
+      font-family: 'Inter', sans-serif; transition: border-color .15s, color .15s;
+    }
+    .btn-ghost:hover { border-color: var(--primary); color: var(--primary); }
+    .btn-ghost:disabled { opacity: .6; cursor: not-allowed; }
+    .copy-btn {
+      background: none; border: none; cursor: pointer; color: var(--muted);
+      padding: 4px 6px; font-size: .9rem;
+    }
+    .copy-btn:hover { color: var(--primary); }
+
     .form-msg { font-size: .82rem; margin-top: 4px; margin-bottom: 14px; display: none; }
     .form-msg.show { display: block; }
     .form-msg.error { color: #EF4444; }
@@ -161,6 +189,47 @@
       <div class="field-hint" id="usernameHint"></div>
     </div>
     <button class="btn-save" id="saveUsernameBtn" onclick="saveUsername()" disabled>Save Username</button>
+  </div>
+
+  <div class="panel">
+    <div class="panel-heading">
+      <div class="panel-heading-icon"><i class="fas fa-key"></i></div>
+      Logging Key
+    </div>
+
+    <p class="key-note">
+      You enter this code each time you log or edit a trip. It is here so trips
+      have to be entered by you rather than by a script.
+      <strong>It is not shown until you confirm your password</strong> — that is
+      what stops anything already signed in as you from simply reading it off
+      this page.
+    </p>
+
+    <div class="form-msg" id="keyMsg"></div>
+
+    <div class="key-display">
+      <span class="key-value hidden-key" id="keyValue">••••–••••</span>
+      <button type="button" class="copy-btn d-none" id="keyCopyBtn"
+              onclick="copyLoggingKey()" title="Copy to clipboard" aria-label="Copy logging key">
+        <i class="fas fa-copy"></i>
+      </button>
+    </div>
+
+    <div class="field">
+      <label for="keyPassword">Confirm Your Password</label>
+      <div class="pw-wrap">
+        <input type="password" id="keyPassword" placeholder="••••••••"
+               autocomplete="current-password">
+        <button type="button" class="pw-toggle" onclick="togglePw(this)" tabindex="-1" aria-label="Toggle password visibility">
+          <i class="fas fa-eye"></i>
+        </button>
+      </div>
+    </div>
+
+    <div class="key-actions">
+      <button class="btn-save" id="revealKeyBtn" onclick="revealLoggingKey()">Show My Key</button>
+      <button class="btn-ghost" id="regenKeyBtn" onclick="regenerateLoggingKey()">Generate a New Key</button>
+    </div>
   </div>
 
   <div class="panel">
@@ -355,6 +424,86 @@ function togglePw(btn) {
   input.type      = show ? 'text' : 'password';
   icon.className  = show ? 'fas fa-eye-slash' : 'fas fa-eye';
 }
+
+// ─── Logging key ────────────────────────────────────────────────────────────
+// The key is never rendered into this page by the server. It arrives only in
+// the response to a request that carried the account password, which is the
+// whole reason it is worth typing when logging a trip.
+
+function setKeyMsg(text, kind) {
+  const el = document.getElementById('keyMsg');
+  el.classList.remove('show', 'error', 'success');
+  if (!text) return;
+  el.textContent = text;
+  el.classList.add('show', kind);
+}
+
+function showLoggingKey(key) {
+  const el = document.getElementById('keyValue');
+  el.textContent = key;
+  el.classList.remove('hidden-key');
+  document.getElementById('keyCopyBtn').classList.remove('d-none');
+}
+
+// Shared by both buttons: the only difference is the method and what it means.
+// POST reads the existing key, PUT replaces it.
+async function requestLoggingKey(method, btn, busyLabel, okMessage) {
+  const pwInput = document.getElementById('keyPassword');
+  const password = pwInput.value;
+  setKeyMsg('');
+
+  if (!password) {
+    setKeyMsg('Enter your password first.', 'error');
+    pwInput.focus();
+    return;
+  }
+
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = busyLabel;
+  try {
+    const resp = await fetch('/profile/logging-key', {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password })
+    });
+    const data = await resp.json();
+    if (!resp.ok) { setKeyMsg(data.error || 'Could not read your logging key.', 'error'); return; }
+    showLoggingKey(data.logging_key);
+    setKeyMsg(okMessage, 'success');
+    // Not left sitting in the field once it has been spent.
+    pwInput.value = '';
+  } catch {
+    setKeyMsg('Network error. Could not reach the server.', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = original;
+  }
+}
+
+function revealLoggingKey() {
+  return requestLoggingKey('POST', document.getElementById('revealKeyBtn'),
+                           'Checking…', 'This is your logging key.');
+}
+
+function regenerateLoggingKey() {
+  if (!confirm('Generate a new logging key?\n\nThe old one stops working immediately, so anywhere you have it written down will need updating.')) return;
+  return requestLoggingKey('PUT', document.getElementById('regenKeyBtn'),
+                           'Generating…', 'New key generated. The old one no longer works.');
+}
+
+async function copyLoggingKey() {
+  const key = document.getElementById('keyValue').textContent;
+  try {
+    await navigator.clipboard.writeText(key);
+    setKeyMsg('Copied to clipboard.', 'success');
+  } catch {
+    // Clipboard access needs a secure context and permission, and is simply
+    // absent in some in-app browsers. The key is on screen either way.
+    setKeyMsg('Could not copy automatically — select the key above instead.', 'error');
+  }
+}
+
 
 async function changePassword() {
   const current = document.getElementById('currentPassword').value;
