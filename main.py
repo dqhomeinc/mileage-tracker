@@ -86,6 +86,25 @@ app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 # the cookie is never stored over http://localhost and nobody could sign in.
 app.config['SESSION_COOKIE_SECURE'] = IS_DEPLOYED
 
+# The "remember me" cookie, which Flask-Login sets when the login form's
+# checkbox is ticked. It is a second bearer credential, separate from the
+# session and longer-lived, and it was running entirely on Flask-Login's
+# defaults: 365 days, not Secure, no SameSite. So ticking the box minted a
+# year-long credential with weaker protection than the session it outlasts.
+#
+# Thirty days rather than a year. This is the real auto-logout policy -- there
+# is no server-side revocation anywhere in this app, so logging out clears the
+# cookie in that browser and does nothing to a copy someone else holds. The
+# expiry is the only thing that ever ends such a copy's usefulness, which makes
+# a year a long time to hand out and 30 days a deliberate choice rather than an
+# inherited default.
+app.config['REMEMBER_COOKIE_DURATION'] = timedelta(days=30)
+app.config['REMEMBER_COOKIE_HTTPONLY'] = True
+app.config['REMEMBER_COOKIE_SAMESITE'] = 'Lax'
+# Conditional for the same reason as the session cookie: required over TLS,
+# impossible over http://localhost.
+app.config['REMEMBER_COOKIE_SECURE'] = IS_DEPLOYED
+
 MAX_PHOTO_BYTES = 2 * 1024 * 1024  # 2MB
 # Receipts are photographed on phones, where 2MB is a routine single image, so
 # attachments get their own larger ceiling. Both counts are enforced per file
