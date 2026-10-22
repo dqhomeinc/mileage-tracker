@@ -1148,19 +1148,24 @@ def _record_login_failure(ip, email):
     db.session.commit()
 
 
-def _clear_login_failures(ip, email):
-    """Forget this address's and this email's failures after a success.
+def _clear_login_failures(email):
+    """Forget this email's failures after a successful sign-in.
 
     So that someone who mistypes a few times and then gets it right is not
     carrying those failures towards a limit for the rest of the window.
+
+    Only the email. Clearing the address's failures as well would hand the IP
+    budget back on demand: anyone with an account of their own could guess
+    nineteen times at other addresses, sign in to their own to reset the count,
+    and repeat for ever -- so the address limit would never engage at all. It is
+    a budget per window, and a success is not a refund. Behind a shared address
+    it would also have erased other people's failures.
     """
-    query = db.session.query(LoginAttempt)
-    conditions = [c for c in (LoginAttempt.ip == ip if ip else None,
-                              LoginAttempt.email == email if email else None)
-                  if c is not None]
-    if not conditions:
+    if not email:
         return
-    query.filter(db.or_(*conditions)).delete(synchronize_session=False)
+    (db.session.query(LoginAttempt)
+     .filter(LoginAttempt.email == email)
+     .delete(synchronize_session=False))
     db.session.commit()
 
 
@@ -1196,7 +1201,7 @@ def login():
             authenticated = False
 
         if authenticated:
-            _clear_login_failures(ip, email)
+            _clear_login_failures(email)
             login_user(user, remember=remember)
             return redirect(url_for('index'))
 
