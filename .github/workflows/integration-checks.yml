@@ -90,6 +90,22 @@ jobs:
       - name: Check the SECRET_KEY startup guard
         run: python .github/scripts/check_secret_key.py
 
+  # The login form used to say whether an email was registered, and -- after
+  # that wording was fixed -- would still have said it in response time, since
+  # a missing account skipped scrypt entirely. The timing half is invisible to
+  # review and to every other check here.
+  login-enumeration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Check the login form does not reveal which emails exist
+        run: python .github/scripts/check_login_enumeration.py
+
   # CI has no DATABASE_URL, so a plain `import app` always falls back to
   # SQLite and never exercises the pg8000 connection or the Postgres branch
   # of _migrate_db() — both of which production actually depends on.

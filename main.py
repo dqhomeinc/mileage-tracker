@@ -1062,6 +1062,18 @@ def register():
     return render_template('register.html')
 
 
+# Verifying a password costs real time by design -- scrypt is deliberately slow.
+# So returning early for an address that has no account made the response
+# noticeably faster than one for an address that does, and the timing answered
+# the question the wording had just stopped answering. Hashing against a
+# throwaway digest spends the same work either way.
+#
+# Computed once at import rather than per request: it proves nothing about any
+# user, and generating a fresh one per attempt would itself make the
+# no-such-user path the slower of the two.
+_ABSENT_USER_HASH = generate_password_hash('password-for-no-account')
+
+
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if current_user.is_authenticated:
@@ -1071,13 +1083,29 @@ def login():
         password = request.form.get('password', '')
         remember = request.form.get('remember') == '1'
         user = User.query.filter_by(email=email).first()
-        if not user:
-            flash('No account is associated with that email.', 'danger')
-        elif not user.check_password(password):
-            flash('Incorrect password.', 'danger')
+        # Exactly one password hash either way. Checking the real one only when
+        # a user exists, and a throwaway otherwise, is what keeps the two cases
+        # the same length -- hashing the real one and then also the throwaway
+        # would simply invert the difference.
+        if user:
+            authenticated = user.check_password(password)
         else:
+            check_password_hash(_ABSENT_USER_HASH, password)
+            authenticated = False
+
+        if authenticated:
             login_user(user, remember=remember)
             return redirect(url_for('index'))
+
+        # One message for both failures. Saying "no account is associated with
+        # that email" confirmed which addresses are registered here, which turns
+        # guessing an email *and* a password into guessing only the password,
+        # and lets a leaked address list be tested against this app. The reset
+        # form already refuses to answer the same question.
+        #
+        # This wording cannot be narrowed later without undoing the fix:
+        # anything that distinguishes the two cases is the same leak reworded.
+        flash('Email or password is incorrect.', 'danger')
 
     return render_template('login.html')
 
