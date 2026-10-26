@@ -1,4 +1,6 @@
 import base64
+from functools import wraps
+import hashlib
 import hmac
 import json
 import os
@@ -9,7 +11,7 @@ import requests
 from dotenv import load_dotenv
 from itsdangerous import URLSafeTimedSerializer, SignatureExpired, BadSignature
 from flask import (Flask, render_template, request, redirect, url_for, jsonify, flash,
-                   session, Response)
+                   session, Response, g)
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy.orm import defer
 from flask_login import (
@@ -159,6 +161,46 @@ class User(UserMixin, db.Model):
         return check_password_hash(self.password_hash, password)
 
 
+class ApiKey(db.Model):
+    """A scoped credential a user issues so an agent can log trips for them.
+
+    The point of it is what it *cannot* do. A user who wants a script or an
+    assistant to log trips on their behalf would otherwise have to hand over
+    their password, which is complete account access. A key is create-trips
+    and read-reference-data only, belongs to one account, and can be revoked
+    without touching the password or signing anyone out.
+
+    Stored as a hash, unlike User.logging_key, because the two have opposite
+    requirements: a logging key has to be displayable in the profile for ever,
+    while an API key is shown once at creation and never again. So a database
+    leak yields working logging keys but not working API keys.
+
+    That means the secret itself cannot be looked up, which is what public_id
+    is for -- it is the non-secret half of the key, stored plaintext and
+    indexed, so a request finds its row in one query and only then compares
+    the hash. Hashing the whole key would mean scanning every row.
+    """
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, index=True)
+    # What the key is for, so a user with several can tell them apart when
+    # deciding which to revoke.
+    name = db.Column(db.String(60), nullable=False)
+    public_id = db.Column(db.String(32), nullable=False, unique=True, index=True)
+    secret_hash = db.Column(db.String(64), nullable=False)
+    created_at = db.Column(db.DateTime, nullable=False)
+    # How a dormant or unexpectedly active key becomes visible. The only
+    # monitoring this design has, and the reason no expiry is needed.
+    last_used_at = db.Column(db.DateTime, nullable=True)
+    # Set rather than deleted, so a revoked key's name and last use can still
+    # be shown -- "this key was being used until Tuesday" is the useful fact
+    # after revoking one.
+    revoked_at = db.Column(db.DateTime, nullable=True)
+
+    @property
+    def active(self):
+        return self.revoked_at is None
+
+
 class Vehicle(db.Model):
     id      = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
@@ -244,16 +286,20 @@ def load_user(user_id):
 # DB helpers
 # ---------------------------------------------------------------------------
 
-def _vehicle_dict(v):
+# `owner` is passed by the API routes, which authenticate by key and so have no
+# current_user to read the default from. The signed-in paths leave it out.
+def _vehicle_dict(v, owner=None):
+    owner = owner or current_user
     sub = ' '.join(filter(None, [v.year, v.make, v.model]))
     return {'id': v.id, 'name': v.name, 'year': v.year, 'make': v.make,
             'model': v.model, 'sub': sub,
-            'is_default': v.id == current_user.default_vehicle_id}
+            'is_default': v.id == owner.default_vehicle_id}
 
 
-def _business_dict(b):
+def _business_dict(b, owner=None):
+    owner = owner or current_user
     return {'id': b.id, 'name': b.name,
-            'is_default': b.id == current_user.default_business_id}
+            'is_default': b.id == owner.default_business_id}
 
 
 def _trip_dict(trip, vehicle_name=None, vehicle_sub=None, business_name=None,
@@ -1291,17 +1337,35 @@ def _stops_from_db(raw):
     return stops if isinstance(stops, list) else []
 
 
-def _resolve_business(business_id):
-    """(id, name) for a business the current user owns, else (None, None).
+def _resolve_business_for(user_id, business_id):
+    """(id, name) for a business `user_id` owns, else (None, None).
 
     Scoped to the owner so a trip can't be attributed to another user's
     business by passing its id. An unknown id drops the attribution rather
     than failing the trip, matching how an unknown vehicle id is handled.
+
+    Takes the owner rather than reading current_user because the API routes
+    authenticate by key and have no session at all.
     """
     if not business_id:
         return None, None
-    b = Business.query.filter_by(id=int(business_id), user_id=current_user.id).first()
+    b = Business.query.filter_by(id=int(business_id), user_id=user_id).first()
     return (b.id, b.name) if b else (None, None)
+
+
+def _resolve_business(business_id):
+    """As above, for the signed-in user."""
+    return _resolve_business_for(current_user.id, business_id)
+
+
+def _resolve_vehicle_for(user_id, vehicle_id):
+    """(id, name, subtitle) for a vehicle `user_id` owns, else (None, None, None)."""
+    if not vehicle_id:
+        return None, None, None
+    v = Vehicle.query.filter_by(id=int(vehicle_id), user_id=user_id).first()
+    if not v:
+        return None, None, None
+    return v.id, v.name, ' '.join(filter(None, [v.year, v.make, v.model]))
 
 
 def _absolute_minutes(date_str, time_str):
@@ -2203,6 +2267,289 @@ def change_password():
     current_user.set_password(new_password)
     db.session.commit()
     return jsonify({'success': True})
+
+
+# ---------------------------------------------------------------------------
+# API keys
+# ---------------------------------------------------------------------------
+
+# A key reads mtk_<public_id>.<secret>. The prefix makes one recognisable in a
+# log or a config file, and the dot separates the two halves unambiguously --
+# the secret is urlsafe base64, which contains '-' and '_' but never '.', so
+# splitting on an underscore would have been ambiguous.
+API_KEY_PREFIX = 'mtk_'
+API_KEY_PUBLIC_BYTES = 6    # 12 hex characters
+API_KEY_SECRET_BYTES = 32   # 256 bits
+
+# How many keys one account may hold at once, counting only active ones. High
+# enough never to be met in normal use; it exists so minting cannot be used to
+# fill the table.
+MAX_ACTIVE_API_KEYS = 20
+
+
+def _hash_api_secret(secret):
+    """SHA-256 of the secret half, hex.
+
+    Deliberately not a password hash. Slow hashing protects secrets that can be
+    guessed -- a password has maybe 40 bits of entropy, so scrypt's cost is what
+    makes an offline attack impractical. This secret is 256 random bits and
+    cannot be brute-forced at any speed, so a slow hash would buy nothing and
+    cost something real: every request, including every wrong one, would spend
+    tens of milliseconds, which is an easy way to exhaust a single-worker
+    instance.
+    """
+    return hashlib.sha256(secret.encode('utf-8')).hexdigest()
+
+
+def generate_api_key():
+    """A new (public_id, secret, full_key). The full key is never stored."""
+    public_id = secrets.token_hex(API_KEY_PUBLIC_BYTES)
+    secret = secrets.token_urlsafe(API_KEY_SECRET_BYTES)
+    return public_id, secret, f'{API_KEY_PREFIX}{public_id}.{secret}'
+
+
+def parse_api_key(token):
+    """(public_id, secret) from a presented key, or (None, None).
+
+    Whitespace is stripped because a key that has been copied out of a panel
+    and pasted into a config file routinely arrives with some.
+    """
+    token = (token or '').strip()
+    if not token.startswith(API_KEY_PREFIX):
+        return None, None
+    body = token[len(API_KEY_PREFIX):]
+    public_id, dot, secret = body.partition('.')
+    if not dot or not public_id or not secret:
+        return None, None
+    return public_id, secret
+
+
+def _api_key_from_request():
+    """The ApiKey this request presents, or None.
+
+    Only ever reached from /api/v1 routes. A key authenticates one request; it
+    never establishes a session, so holding one does not make the browser-facing
+    pages reachable.
+    """
+    header = request.headers.get('Authorization', '')
+    scheme, _, token = header.partition(' ')
+    if scheme.lower() != 'bearer':
+        return None
+
+    public_id, secret = parse_api_key(token)
+    if not public_id:
+        return None
+
+    key = ApiKey.query.filter_by(public_id=public_id).first()
+    if not key or not key.active:
+        return None
+    if not hmac.compare_digest(key.secret_hash, _hash_api_secret(secret)):
+        return None
+    return key
+
+
+def api_key_required(view):
+    """Authenticate by API key, or refuse.
+
+    Sets g.api_key and g.api_user. Does not touch the login session: these
+    routes are for clients that have no browser, and a key must not become a
+    way to reach anything that only @login_required protects.
+    """
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        key = _api_key_from_request()
+        if not key:
+            # One message for a missing, malformed, unknown and revoked key
+            # alike. Distinguishing them would tell someone probing which of
+            # their guesses had named a real key.
+            return jsonify({'error': 'Invalid or missing API key.'}), 401
+
+        user = db.session.get(User, key.user_id)
+        if not user:
+            return jsonify({'error': 'Invalid or missing API key.'}), 401
+
+        # Recorded before the work, so a request that fails validation still
+        # shows the key as used -- the question this answers is "is something
+        # using this key", not "is it succeeding".
+        key.last_used_at = _utcnow()
+        db.session.commit()
+
+        g.api_key = key
+        g.api_user = user
+        return view(*args, **kwargs)
+    return wrapped
+
+
+# ---------------------------------------------------------------------------
+# API v1 — for identified clients with no browser
+# ---------------------------------------------------------------------------
+
+def _split_iso_datetime(value, field):
+    """('YYYY-MM-DD', 'HH:MM') from an ISO datetime, or raise ValueError.
+
+    Naive datetimes only. The app stores a trip's date and time as local
+    wall-clock values -- it has no notion of the user's timezone anywhere -- so
+    an offset-aware value could not be converted to what these columns mean
+    without inventing one. Refusing it is the honest answer; silently dropping
+    the offset would shift a trip by hours.
+    """
+    text = (value or '').strip()
+    if not text:
+        raise ValueError(f'{field} is required.')
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        raise ValueError(f'{field} must be an ISO datetime such as '
+                         f'"2026-10-08T08:29", got {text!r}.')
+    if parsed.tzinfo is not None:
+        raise ValueError(f'{field} must not carry a UTC offset. Trips are stored '
+                         'as local wall-clock time, so send the local time.')
+    return parsed.strftime('%Y-%m-%d'), parsed.strftime('%H:%M')
+
+
+# Field names the earlier draft of this API used, which mean different things
+# here: it used start/end for times, while this app has always used them for
+# places. Accepting either as an alias would eventually write a timestamp into
+# a location column, so they are refused by name instead -- an agent can act on
+# being told the right field, and cannot act on a trip logged wrongly.
+_API_TRIP_ALIASES = {'start', 'end', 'from', 'to', 'date', 'start_date'}
+
+_API_TRIP_FIELDS = {'start_location', 'end_location', 'started_at', 'ended_at',
+                    'notes', 'vehicle_id', 'business_id', 'stops', 'miles'}
+
+
+@app.route('/api/v1/trips', methods=['POST'])
+@api_key_required
+def api_create_trip():
+    """Log one trip for the key's owner.
+
+    Deliberately does not require the per-trip logging key. That exists so a
+    trip logged through the browser is a deliberate human act; a request here is
+    already identified by a credential the account holder issued on purpose, so
+    asking for both would be redundant rather than safer.
+    """
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'error': 'Send a JSON object with Content-Type: application/json.'}), 422
+
+    unknown = set(data) - _API_TRIP_FIELDS
+    if unknown:
+        hint = (' Note that start/end are locations here, and times are '
+                'started_at/ended_at.' if unknown & _API_TRIP_ALIASES else '')
+        return jsonify({'error': f'Unknown fields: {", ".join(sorted(unknown))}. '
+                                 f'Expected: {", ".join(sorted(_API_TRIP_FIELDS))}.{hint}'}), 422
+
+    start = (data.get('start_location') or '').strip()
+    end = (data.get('end_location') or '').strip()
+    if not start or not end:
+        return jsonify({'error': 'start_location and end_location are required.'}), 422
+
+    try:
+        trip_date, start_time = _split_iso_datetime(data.get('started_at'), 'started_at')
+        end_date, end_time = (None, None)
+        if data.get('ended_at'):
+            end_date, end_time = _split_iso_datetime(data.get('ended_at'), 'ended_at')
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 422
+
+    # The same validators the form uses, so the two paths cannot disagree about
+    # what a coherent trip is. client_today is the trip's own date: there is no
+    # browser clock to consult, and the server's date is the only one available.
+    date_error = validate_trip_date(trip_date, client_today=trip_date)
+    if date_error:
+        return jsonify({'error': date_error}), 422
+    date_error = validate_end_date(end_date, trip_date, start_time, end_time)
+    if date_error:
+        return jsonify({'error': date_error}), 422
+
+    try:
+        stops = _clean_stops(data.get('stops'))
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 422
+
+    user = g.api_user
+    vehicle_id, vehicle_name, vehicle_sub = _resolve_vehicle_for(user.id, data.get('vehicle_id'))
+    business_id, business_name = _resolve_business_for(user.id, data.get('business_id'))
+
+    # Measured here rather than taken from the request. A caller asserting its
+    # own mileage is the thing the logging key exists to prevent, and there is
+    # no reason to reintroduce it for a client that can simply be measured.
+    distance_miles = duration_seconds = None
+    try:
+        distance_miles, duration_seconds, _endpoints = calculate_driving_miles(
+            start, end, stops=stops)
+    except Exception:
+        # A supplied value is used only when measuring produced nothing, so a
+        # trip is still recorded rather than lost. Worth knowing that a caller
+        # willing to send an unroutable address can reach this branch
+        # deliberately and name its own mileage; the addresses it sent stay on
+        # the trip, so that is visible afterwards rather than silent.
+        supplied = data.get('miles')
+        if supplied is not None:
+            try:
+                distance_miles = float(supplied)
+            except (TypeError, ValueError):
+                return jsonify({'error': 'miles must be a number.'}), 422
+
+    # The same cleaner the form path uses, so the two cannot disagree about what
+    # a valid note is: over-long notes are truncated rather than refused,
+    # because losing the mileage over the length of an incidental note would be
+    # the wrong trade.
+    notes = _clean_notes(data.get('notes'))
+
+    trip = Trip(
+        user_id=user.id,
+        start_location=start,
+        end_location=end,
+        distance_miles=distance_miles,
+        duration_seconds=duration_seconds,
+        trip_date=trip_date,
+        start_time=start_time,
+        end_time=end_time,
+        end_date=end_date,
+        notes=notes,
+        stops=json.dumps(stops) if stops else None,
+        vehicle_id=vehicle_id,
+        business_id=business_id,
+    )
+    db.session.add(trip)
+    db.session.commit()
+
+    warning = None
+    if distance_miles is not None:
+        warning = check_trip_feasibility(start_time, end_time, distance_miles,
+                                         duration_seconds, stop_count=len(stops),
+                                         trip_date=trip_date, end_date=end_date)
+
+    return jsonify({
+        'id': trip.id,
+        'miles': distance_miles,
+        'measured': duration_seconds is not None,
+        'vehicle': vehicle_name,
+        'business': business_name,
+        'warning': warning,
+    }), 201
+
+
+@app.route('/api/v1/vehicles', methods=['GET'])
+@api_key_required
+def api_list_vehicles():
+    """The key owner's vehicles, so a client can send a valid vehicle_id.
+
+    Read only. There is no API route that creates, changes or deletes one.
+    """
+    vs = (Vehicle.query.filter_by(user_id=g.api_user.id)
+          .order_by(Vehicle.name).all())
+    return jsonify([_vehicle_dict(v, owner=g.api_user) for v in vs])
+
+
+@app.route('/api/v1/businesses', methods=['GET'])
+@api_key_required
+def api_list_businesses():
+    """The key owner's businesses. Read only, as above."""
+    bs = (Business.query.filter_by(user_id=g.api_user.id)
+          .order_by(Business.name).all())
+    return jsonify([_business_dict(b, owner=g.api_user) for b in bs])
 
 
 # ---------------------------------------------------------------------------
