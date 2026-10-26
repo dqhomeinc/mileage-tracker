@@ -106,6 +106,23 @@ jobs:
       - name: Check the login form does not reveal which emails exist
         run: python .github/scripts/check_login_enumeration.py
 
+  # A user logged one journey twice. Catching that has to be server-side, since
+  # the two entries can come from page loads that never saw each other, and it
+  # has to ask rather than refuse, since two visits to one client in a day are
+  # a real pair of trips. Both halves -- catching the repeat and not obstructing
+  # the genuine pair -- are invisible to every other check here.
+  duplicate-trips:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Check duplicate trip entries are queried
+        run: python .github/scripts/check_duplicate_trips.py
+
   # CI has no DATABASE_URL, so a plain `import app` always falls back to
   # SQLite and never exercises the pg8000 connection or the Postgres branch
   # of _migrate_db() — both of which production actually depends on.

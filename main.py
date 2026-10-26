@@ -1304,6 +1304,48 @@ def _resolve_business(business_id):
     return (b.id, b.name) if b else (None, None)
 
 
+def find_duplicate_trip(user_id, start, end, trip_date, start_time):
+    """An existing trip that looks like the same journey, or None.
+
+    Matched on the owner, both locations, the date and the start time. Those
+    five together are what make this precise rather than merely suggestive: two
+    site visits to the same client on one day are a genuine pair of trips and
+    differ by when they began, while two entries of a single journey agree on
+    all five. A round trip logged as two legs has its locations reversed, so it
+    does not match either.
+
+    Deliberately not the mileage. It is derived from the locations, so two
+    entries of one trip agree on it by construction -- it would make the match
+    look stricter while discriminating nothing.
+
+    A trip with no start time is matched only against others with no start
+    time: filter_by(start_time=None) is IS NULL, so a timed entry and an
+    untimed one are never taken for each other. That is the weakest case --
+    two untimed trips between the same places on one day could be real -- which
+    is why the caller asks rather than refuses.
+    """
+    if not (start and end and trip_date):
+        return None
+    return (Trip.query
+            .filter_by(user_id=user_id, start_location=start, end_location=end,
+                       trip_date=trip_date, start_time=start_time)
+            .order_by(Trip.id.desc())
+            .first())
+
+
+def _duplicate_summary(trip):
+    """Enough of the existing trip for the client to describe it back."""
+    return {
+        'id': trip.id,
+        'start': trip.start_location,
+        'end': trip.end_location,
+        'trip_date': trip.trip_date,
+        'start_time': trip.start_time,
+        'end_time': trip.end_time,
+        'miles': trip.distance_miles,
+    }
+
+
 @app.route('/log', methods=['POST'])
 @login_required
 def log_trip():
@@ -1332,6 +1374,22 @@ def log_trip():
     date_error = validate_end_date(end_date, trip_date, start_time, end_time)
     if date_error:
         return jsonify({'error': date_error}), 400
+
+    # Before the distance lookup, like the key check above: a trip that is
+    # about to be refused should not spend a billable Routes call first.
+    #
+    # Refused with 409 rather than silently dropped or silently accepted. The
+    # client asks the user and sends the same trip back with
+    # confirm_duplicate, which is the only way to express "yes, I did drive
+    # that twice" -- and the reason this is not a hard reject.
+    if not data.get('confirm_duplicate'):
+        existing = find_duplicate_trip(current_user.id, start, end, trip_date, start_time)
+        if existing:
+            return jsonify({
+                'duplicate': True,
+                'error': 'You have already logged this trip.',
+                'existing': _duplicate_summary(existing),
+            }), 409
 
     start_place_id = (data.get('start_place_id') or '').strip() or None
     end_place_id   = (data.get('end_place_id')   or '').strip() or None
