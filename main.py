@@ -1304,6 +1304,100 @@ def _resolve_business(business_id):
     return (b.id, b.name) if b else (None, None)
 
 
+def _absolute_minutes(date_str, time_str):
+    """Minutes since an arbitrary epoch day, or None.
+
+    Dates are folded into the number so two trips can be compared across
+    midnight: an overnight trip starting on the 7th and one starting just after
+    midnight on the 8th are an hour apart, which a minutes-of-day comparison
+    would read as twenty-three.
+    """
+    day = _parse_iso_date(date_str)
+    minute = _minutes_of_day(time_str)
+    if day is None or minute is None:
+        return None
+    return day.toordinal() * 1440 + minute
+
+
+def _trip_window(trip_date, start_time, end_time, end_date, duration_seconds):
+    """(start, end) in absolute minutes for a trip, or None if it has no start.
+
+    The end comes from the stated end time where there is one, and from the
+    measured drive time where there is not -- a trip entered without an end
+    time still occupies the road for as long as the route takes. Failing both,
+    the trip is a single instant: two instants at different times do not
+    overlap, which is the right answer when there is nothing to say how long
+    either lasted.
+    """
+    begin = _absolute_minutes(trip_date, start_time)
+    if begin is None:
+        return None
+    if end_time:
+        finish = _absolute_minutes(end_date or _derived_end_date(trip_date, start_time, end_time),
+                                   end_time)
+        if finish is not None and finish >= begin:
+            return begin, finish
+    if duration_seconds:
+        return begin, begin + max(0, round(duration_seconds / 60))
+    return begin, begin
+
+
+def _windows_overlap(a, b):
+    """Whether two (start, end) windows describe overlapping time.
+
+    Strictly, so that back-to-back trips are not caught: one ending at 09:30
+    and the next starting at 09:30 share an instant but no duration, and are a
+    perfectly ordinary pair.
+
+    Equal starts are caught regardless of length, because two trips departing
+    at the same minute cannot both have happened even if neither says how long
+    it took.
+    """
+    if a[0] == b[0]:
+        return True
+    return a[0] < b[1] and b[0] < a[1]
+
+
+def find_overlapping_trip(user_id, start, end, trip_date, window):
+    """A trip on the same route whose time overlaps `window`, or None.
+
+    This is the case that cannot be explained away. Two visits to one client in
+    a day are a real pair of trips and differ by when they began; a return leg
+    has its locations reversed. But the same route at the same time, twice, is
+    not something that happened -- so the caller refuses it rather than asking,
+    because there is no answer a person could give that would make it true.
+
+    Neighbouring dates are considered as well as the trip's own, since a trip
+    that began before midnight ends on the following date and can overlap one
+    starting after it.
+
+    Every trip already recorded is kept either way -- only the new one is
+    refused, and nothing existing is altered. Ordering by id therefore decides
+    only which trip gets described back to the caller when more than one
+    overlaps, and the earliest is the clearer answer to "you already logged
+    this".
+    """
+    if not (start and end and trip_date and window):
+        return None
+    day = _parse_iso_date(trip_date)
+    if day is None:
+        return None
+    nearby = [(day + timedelta(days=offset)).isoformat() for offset in (-1, 0, 1)]
+
+    candidates = (Trip.query
+                  .filter_by(user_id=user_id, start_location=start, end_location=end)
+                  .filter(Trip.trip_date.in_(nearby))
+                  .order_by(Trip.id)
+                  .all())
+    for candidate in candidates:
+        other = _trip_window(candidate.trip_date, candidate.start_time,
+                             candidate.end_time, _trip_end_date(candidate),
+                             candidate.duration_seconds)
+        if other and _windows_overlap(window, other):
+            return candidate
+    return None
+
+
 def find_duplicate_trip(user_id, start, end, trip_date, start_time):
     """An existing trip that looks like the same journey, or None.
 
@@ -1382,11 +1476,32 @@ def log_trip():
     # client asks the user and sends the same trip back with
     # confirm_duplicate, which is the only way to express "yes, I did drive
     # that twice" -- and the reason this is not a hard reject.
-    if not data.get('confirm_duplicate'):
+    # The same route at an overlapping time is refused outright, and cannot be
+    # confirmed through: it describes being in two places at once, so there is
+    # no answer a person could give that would make it true. The first trip
+    # recorded is the one kept -- a correction belongs in an edit of that trip,
+    # not in a second copy of it.
+    window = _trip_window(trip_date, start_time, end_time, end_date,
+                          data.get('duration_seconds'))
+    clash = find_overlapping_trip(current_user.id, start, end, trip_date, window)
+    if clash:
+        return jsonify({
+            'duplicate': True,
+            'can_confirm': False,
+            'error': 'You have already logged this trip, over the same hours. '
+                     'Only the first was kept.',
+            'existing': _duplicate_summary(clash),
+        }), 409
+
+    # Without times there is nothing to overlap, so an identical untimed entry
+    # is only ever suspicious: two untimed trips between the same places on one
+    # day could be real. That one is asked about rather than refused.
+    if window is None and not data.get('confirm_duplicate'):
         existing = find_duplicate_trip(current_user.id, start, end, trip_date, start_time)
         if existing:
             return jsonify({
                 'duplicate': True,
+                'can_confirm': True,
                 'error': 'You have already logged this trip.',
                 'existing': _duplicate_summary(existing),
             }), 409

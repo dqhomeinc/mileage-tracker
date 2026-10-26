@@ -8,13 +8,21 @@ a slow request on a sleeping instance looks like nothing happening, so the trip
 gets typed in again, and then both land.
 
 That shapes the fix. It has to be server-side, because the two entries may come
-from different page loads that never saw each other's result. And it has to
-*ask* rather than refuse, because two visits to the same client on one day are
-a genuine pair of trips that no comparison of fields can distinguish from one
-trip entered twice.
+from different page loads that never saw each other's result -- and matching on
+an equal start time is not enough, because the form autofills the start time to
+the current clock, so a trip typed in again six minutes later carries a
+different one.
 
-So the properties worth pinning down are both directions of that: the same trip
-is caught, and trips that merely resemble each other are not.
+What it matches on instead is overlap. The same route over overlapping hours
+describes being in two places at once, so it is refused outright and the first
+trip is kept; there is no answer a person could give that would make two of
+them true. Only the untimed case is asked about, since without times there is
+nothing to overlap and two untimed trips between the same places on one day
+could be real.
+
+So the properties worth pinning down are: the reported case is caught and
+cannot be forced through, genuine pairs are untouched, and the ambiguous case is
+asked rather than refused.
 
 Run as a script so it fits the other checks in this directory; no test runner.
 """
@@ -88,7 +96,9 @@ def trip(key, **overrides):
     body = {'start': 'Lexington, MA', 'end': 'Clinton Street, Newton',
             'trip_date': '2026-10-08', 'start_time': '08:29', 'logging_key': key}
     body.update(overrides)
-    return body
+    # An explicit None means "no start time", which is a case under test, so it
+    # has to survive rather than be defaulted back.
+    return {k: v for k, v in body.items() if v is not None or k == 'start_time'}
 
 
 def log(client, key, **overrides):
@@ -101,94 +111,173 @@ def trip_count():
 
 
 # ── The reported case ─────────────────────────────────────────────────────
-expect('the first entry is logged', log(jane, jane_key).status_code, 200)
+# A slow request, a re-entry six minutes later, and the autofilled start time
+# differs. An equal-start-time match lets this through; this is the case the
+# whole change exists for.
+expect('the first entry is logged',
+       log(jane, jane_key, start_time='08:29', end_time='09:10').status_code, 200)
 before = trip_count()
 
-second = log(jane, jane_key)
-expect('an identical second entry is refused', second.status_code, 409)
-expect('and says so in a way the client can act on', field(second, 'duplicate'), True)
-expect('and nothing was stored', trip_count(), before)
+again = log(jane, jane_key, start_time='08:35', end_time='09:16')
+expect('a re-entry with a later start time is refused', again.status_code, 409)
+expect('and is marked as a duplicate', field(again, 'duplicate'), True)
+expect('and says it cannot be confirmed through', field(again, 'can_confirm'), False)
+expect('nothing was stored', trip_count(), before)
 
-# The client needs enough to describe what is already on record, and it has to
-# come from the stored trip rather than be echoed back from the request.
-existing = field(second, 'existing') or {}
-expect('the existing trip is described', existing.get('start'), 'Lexington, MA')
-expect('with its date', existing.get('trip_date'), '2026-10-08')
-expect('its time', existing.get('start_time'), '08:29')
-expect('its measured mileage, which the request never sent',
-       existing.get('miles'), MEASURED[0])
-expect('and its id', isinstance(existing.get('id'), int), True)
+# The point of refusing rather than asking: there is no way through, because
+# the data it would create describes being in two places at once.
+forced = log(jane, jane_key, start_time='08:35', end_time='09:16',
+             confirm_duplicate=True)
+expect('confirm_duplicate does not force an overlap through', forced.status_code, 409)
+expect('and still stores nothing', trip_count(), before)
 
-# Refused before the distance lookup: a trip about to be rejected must not
-# spend a billable Routes call first.
+# The first recorded trip is the one kept, which is what makes this safe to do
+# without asking: nothing already on record is replaced or altered.
+kept = field(again, 'existing') or {}
+expect('the trip kept is the first one', kept.get('start_time'), '08:29')
+expect('described with its own end time', kept.get('end_time'), '09:10')
+expect('and its measured mileage, which the refused request never sent',
+       kept.get('miles'), MEASURED[0])
+
+# Refused before the distance lookup, so a rejected trip costs no Routes call.
 calls = main.calculate_driving_miles.call_count
-log(jane, jane_key)
-expect('a refused duplicate spends no distance lookup',
+log(jane, jane_key, start_time='08:40', end_time='09:21')
+expect('a refused overlap spends no distance lookup',
        main.calculate_driving_miles.call_count, calls)
 
-# ── Confirming is the only way through ──────────────────────────────────
-confirmed = log(jane, jane_key, confirm_duplicate=True)
-expect('confirming logs it', confirmed.status_code, 200)
-expect('and it is stored', trip_count(), before + 1)
+# ── An end time is not required for the window ──────────────────────────
+# A trip entered without one still occupies the road for as long as the route
+# takes, so the measured duration stands in for it.
+# MEASURED is a 15-minute drive, so 08:00 occupies the road until 08:15. A
+# re-entry at 08:05 lands inside that; one at 08:20 does not, and the second
+# assertion matters as much as the first -- a derived window has a real edge,
+# and treating it as unbounded would refuse perfectly ordinary later trips.
+count = trip_count()
+expect('an entry with no end time logs',
+       log(jane, jane_key, trip_date='2026-10-02', start_time='08:00').status_code, 200)
+expect('a re-entry inside its measured drive time is refused',
+       log(jane, jane_key, trip_date='2026-10-02', start_time='08:05').status_code, 409)
+expect('but one after the drive would have finished is allowed',
+       log(jane, jane_key, trip_date='2026-10-02', start_time='08:20').status_code, 200)
+expect('so only the two real trips were stored', trip_count(), count + 2)
 
-# ── Trips that only resemble each other are not duplicates ─────────────
-# This is the half that matters for not becoming an obstacle. Each of these is
-# a real second trip.
+# ── More than one overlapping trip ─────────────────────────────────────
+# Two recorded trips can both overlap a new one without overlapping each other,
+# which is the only way the ordering of the lookup is observable. Both are kept
+# regardless -- nothing recorded is ever altered -- so what this pins down is
+# which of them gets described back, and that nothing was touched.
+count = trip_count()
+first = log(jane, jane_key, trip_date='2026-10-05', start_time='08:00', end_time='08:30')
+second = log(jane, jane_key, trip_date='2026-10-05', start_time='08:40', end_time='09:10')
+expect('two non-overlapping trips on one route both log',
+       (first.status_code, second.status_code), (200, 200))
+
+straddling = log(jane, jane_key, trip_date='2026-10-05',
+                 start_time='08:25', end_time='08:45')
+expect('a trip straddling both is refused', straddling.status_code, 409)
+expect('and the earliest of them is the one described',
+       (field(straddling, 'existing') or {}).get('start_time'), '08:00')
+expect('both recorded trips survive', trip_count(), count + 2)
+
+with main.app.app_context():
+    kept_rows = (main.Trip.query
+                 .filter_by(trip_date='2026-10-05', user_id=main.User.query
+                            .filter_by(email='jane@example.com').first().id)
+                 .order_by(main.Trip.id).all())
+    expect('and neither was altered',
+           [(t.start_time, t.end_time) for t in kept_rows],
+           [('08:00', '08:30'), ('08:40', '09:10')])
+
+# ── Genuine pairs are untouched ────────────────────────────────────────
+# The half that decides whether this is a safeguard or an obstacle. Each of
+# these is a real second trip, and a refusal here would be worse than the bug.
 cases = [
-    ({'start_time': '14:00'}, 'a second visit later the same day'),
-    ({'trip_date': '2026-10-09'}, 'the same journey on another day'),
-    ({'start': 'Clinton Street, Newton', 'end': 'Lexington, MA'},
-     'the return leg, with the locations reversed'),
-    ({'end': 'Somewhere Else, MA'}, 'a different destination'),
+    ({'start_time': '09:10', 'end_time': '09:51'},
+     'a back-to-back trip starting the moment the last one ended'),
+    ({'start_time': '14:00', 'end_time': '14:41'},
+     'a second visit that afternoon'),
+    ({'trip_date': '2026-10-09', 'start_time': '08:29', 'end_time': '09:10'},
+     'the same journey on another day'),
+    ({'start': 'Clinton Street, Newton', 'end': 'Lexington, MA',
+      'start_time': '08:35', 'end_time': '09:16'},
+     'the return leg, overlapping but reversed'),
 ]
 for overrides, label in cases:
     count = trip_count()
     resp = log(jane, jane_key, **overrides)
-    expect(f'{label} is not treated as a duplicate', resp.status_code, 200)
+    expect(f'{label} is allowed', resp.status_code, 200)
     expect(f'{label} is stored', trip_count(), count + 1)
 
-# ── One user's trip is not another's duplicate ────────────────────────
+# Back-to-back is the one a sloppy inclusive comparison would wrongly refuse,
+# so it is asserted at the boundary too: ending and starting on the same minute
+# share an instant but no duration.
+with main.app.app_context():
+    a = main._trip_window('2026-10-08', '09:00', '09:30', None, None)
+    b = main._trip_window('2026-10-08', '09:30', '10:00', None, None)
+    expect('touching windows do not overlap', main._windows_overlap(a, b), False)
+    expect('and overlapping ones do',
+           main._windows_overlap(a, main._trip_window('2026-10-08', '09:29', '10:00', None, None)),
+           True)
+    expect('equal starts overlap whatever their lengths',
+           main._windows_overlap(main._trip_window('2026-10-08', '09:00', None, None, None),
+                                 main._trip_window('2026-10-08', '09:00', None, None, None)),
+           True)
+
+# ── Across midnight ───────────────────────────────────────────────────
+# A trip beginning before midnight ends on the following date, so the dates
+# have to be folded into the comparison rather than the clock compared alone.
 count = trip_count()
-expect("another account logging the same journey is unaffected",
-       log(bob, bob_key).status_code, 200)
+expect('an overnight trip logs',
+       log(jane, jane_key, trip_date='2026-10-11', start_time='23:30',
+           end_time='00:11').status_code, 200)
+expect('and one starting after midnight inside it is refused',
+       log(jane, jane_key, trip_date='2026-10-12', start_time='00:00',
+           end_time='00:41').status_code, 409)
+expect('only the overnight trip was stored', trip_count(), count + 1)
+expect('while one later that morning is allowed',
+       log(jane, jane_key, trip_date='2026-10-12', start_time='07:00',
+           end_time='07:41').status_code, 200)
+
+# ── One user's trip is not another's ─────────────────────────────────
+count = trip_count()
+expect('another account logging the same journey over the same hours is fine',
+       log(bob, bob_key, start_time='08:29', end_time='09:10').status_code, 200)
 expect('and it is stored', trip_count(), count + 1)
 
-# ── Untimed trips ────────────────────────────────────────────────────
-# The weakest signal, and the reason this asks rather than refuses: two
-# untimed trips between the same places on one day could be real. A timed
-# entry and an untimed one must never be taken for each other, though.
+# ── The untimed case is asked, not refused ──────────────────────────
+# Nothing to overlap, so this one genuinely could be a real pair.
 count = trip_count()
-expect('an untimed trip logs', log(jane, jane_key, start_time=None).status_code, 200)
+expect('an untimed trip logs',
+       log(jane, jane_key, trip_date='2026-10-15', start_time=None).status_code, 200)
+asked = log(jane, jane_key, trip_date='2026-10-15', start_time=None)
 expect('a second untimed trip between the same places is queried',
-       log(jane, jane_key, start_time=None).status_code, 409)
-expect('and can be confirmed through',
-       log(jane, jane_key, start_time=None, confirm_duplicate=True).status_code, 200)
-expect('only the two intended trips were stored', trip_count(), count + 2)
+       asked.status_code, 409)
+expect('and this one can be confirmed through', field(asked, 'can_confirm'), True)
+expect('confirming logs it',
+       log(jane, jane_key, trip_date='2026-10-15', start_time=None,
+           confirm_duplicate=True).status_code, 200)
+expect('leaving both', trip_count(), count + 2)
 
-# A timed trip must not match the untimed one just logged.
+# A timed trip must not be taken for an untimed one: there is no window to
+# compare, so neither rule applies.
 count = trip_count()
 expect('a timed trip is not a duplicate of an untimed one',
-       log(jane, jane_key, start_time='19:45').status_code, 200)
+       log(jane, jane_key, trip_date='2026-10-15', start_time='19:45',
+           end_time='20:26').status_code, 200)
 expect('and is stored', trip_count(), count + 1)
 
-# ── The detector itself ─────────────────────────────────────────────
+# ── The window helper ───────────────────────────────────────────────
 with main.app.app_context():
-    jane_id = main.User.query.filter_by(email='jane@example.com').first().id
-    expect('a trip with no date cannot be matched, since it identifies nothing',
-           main.find_duplicate_trip(jane_id, 'A', 'B', None, '08:00'), None)
-    expect('nor one with no locations',
-           main.find_duplicate_trip(jane_id, '', 'B', '2026-10-08', '08:00'), None)
-    found = main.find_duplicate_trip(jane_id, 'Lexington, MA',
-                                     'Clinton Street, Newton', '2026-10-08', '08:29')
-    expect('and a genuine match is found', found is not None, True)
-
-# ── The gate is per request, not sticky ───────────────────────────
-# Confirming once must not leave duplicate checking off for later trips.
-count = trip_count()
-log(jane, jane_key, trip_date='2026-10-20')
-expect('a later identical trip is still queried',
-       log(jane, jane_key, trip_date='2026-10-20').status_code, 409)
-expect('and only the first was stored', trip_count(), count + 1)
+    expect('a trip with no start time has no window',
+           main._trip_window('2026-10-08', None, '09:10', None, None), None)
+    expect('a stated end time is used',
+           main._trip_window('2026-10-08', '08:00', '09:00', None, None)[1]
+           - main._trip_window('2026-10-08', '08:00', '09:00', None, None)[0], 60)
+    expect('the measured duration stands in when there is no end time',
+           main._trip_window('2026-10-08', '08:00', None, None, 1800)[1]
+           - main._trip_window('2026-10-08', '08:00', None, None, 1800)[0], 30)
+    instant = main._trip_window('2026-10-08', '08:00', None, None, None)
+    expect('and with neither the trip is an instant', instant[0], instant[1])
 
 measure.stop()
 os.unlink(_db.name)
@@ -199,5 +288,5 @@ if failures:
         print(f'  - {f}')
     sys.exit(1)
 
-print('Duplicate trip check OK — a repeated entry is queried and nothing is '
-      'stored until confirmed, and trips that merely resemble each other pass.')
+print('Duplicate trip check OK — an overlapping re-entry is refused and the '
+      'first kept, genuine pairs pass, and the untimed case is asked.')
