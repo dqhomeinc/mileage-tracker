@@ -2103,6 +2103,26 @@ def businesses_page():
 # Profile routes
 # ---------------------------------------------------------------------------
 
+def _api_key_dict(key):
+    """A key as the profile shows it. Never includes the secret: the secret is
+    not stored, only its hash, so there is nothing here that could leak one."""
+    return {
+        'id': key.id,
+        'name': key.name,
+        'public_id': key.public_id,
+        'created_at': key.created_at.strftime('%b %d, %Y') if key.created_at else None,
+        'last_used_at': key.last_used_at.strftime('%b %d, %Y at %H:%M')
+                        if key.last_used_at else None,
+        'active': key.active,
+    }
+
+
+def _owned_api_keys():
+    return (ApiKey.query.filter_by(user_id=current_user.id)
+            .order_by(ApiKey.revoked_at.isnot(None), ApiKey.created_at.desc())
+            .all())
+
+
 @app.route('/profile')
 @login_required
 def profile():
@@ -2111,7 +2131,67 @@ def profile():
         username=current_user.username,
         email=current_user.email,
         photo_data=current_user.photo_data,
+        api_keys=[_api_key_dict(k) for k in _owned_api_keys()],
+        api_base_url=request.url_root.rstrip('/'),
     )
+
+
+@app.route('/profile/api-keys', methods=['POST'])
+@login_required
+def create_api_key():
+    """Mint a key and return it once.
+
+    Behind the password for the same reason revealing the logging key is: a
+    stolen session should not be able to issue itself a credential that
+    outlives the session and survives a password change.
+    """
+    data = request.get_json(silent=True) or {}
+    refused = _check_key_gate(data.get('password') or '')
+    if refused:
+        message, status = refused
+        return jsonify({'error': message}), status
+
+    name = (data.get('name') or '').strip()
+    name = _BIDI_CONTROLS.sub('', re.sub(r'[\x00-\x1f\x7f]', '', name))[:60].strip()
+    if not name:
+        return jsonify({'error': 'Give the key a name, so you can tell it apart later.'}), 400
+
+    active = ApiKey.query.filter_by(user_id=current_user.id, revoked_at=None).count()
+    if active >= MAX_ACTIVE_API_KEYS:
+        return jsonify({'error': f'You already have {MAX_ACTIVE_API_KEYS} active keys. '
+                                 'Revoke one before creating another.'}), 400
+
+    public_id, secret, full_key = generate_api_key()
+    key = ApiKey(user_id=current_user.id, name=name, public_id=public_id,
+                 secret_hash=_hash_api_secret(secret), created_at=_utcnow())
+    db.session.add(key)
+    db.session.commit()
+
+    # The only time the full key is ever sent anywhere. It is not stored, so
+    # this response cannot be reproduced -- losing it means revoking and
+    # minting again, which is why minting is cheap.
+    return jsonify({'key': full_key, 'api_key': _api_key_dict(key)})
+
+
+@app.route('/profile/api-keys/<int:key_id>', methods=['DELETE'])
+@login_required
+def revoke_api_key(key_id):
+    """Revoke a key. Takes effect on its next request.
+
+    No password: revoking is the safe direction, and putting a gate in front of
+    it would slow down the one action someone takes when they think a key has
+    leaked. Scoped to the owner, so one account cannot revoke another's.
+
+    Marked rather than deleted, so the name and last use survive -- "this was
+    being used until Tuesday" is the useful fact after revoking something.
+    """
+    key = ApiKey.query.filter_by(id=key_id, user_id=current_user.id).first()
+    if not key:
+        return jsonify({'error': 'Key not found.'}), 404
+    if key.active:
+        key.revoked_at = _utcnow()
+        db.session.commit()
+    return jsonify({'success': True, 'api_key': _api_key_dict(key)})
 
 
 @app.route('/profile/check-username')

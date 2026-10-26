@@ -106,11 +106,12 @@ jobs:
       - name: Check the login form does not reveal which emails exist
         run: python .github/scripts/check_login_enumeration.py
 
-  # A user logged one journey twice. Catching that has to be server-side, since
-  # the two entries can come from page loads that never saw each other, and it
-  # has to ask rather than refuse, since two visits to one client in a day are
-  # a real pair of trips. Both halves -- catching the repeat and not obstructing
-  # the genuine pair -- are invisible to every other check here.
+  # A user logged one journey twice, and 27.1 miles became 54.2. Catching that
+  # has to be server-side, since the two entries can come from page loads that
+  # never saw each other, and matching an equal start time is not enough
+  # because the form autofills it to the current clock. Both halves -- refusing
+  # the overlap and not obstructing a genuine pair of trips on one route -- are
+  # invisible to every other check here.
   duplicate-trips:
     runs-on: ubuntu-latest
     steps:
@@ -120,7 +121,7 @@ jobs:
           python-version: "3.11"
       - name: Install dependencies
         run: pip install -r requirements.txt
-      - name: Check duplicate trip entries are queried
+      - name: Check duplicate trip entries are refused
         run: python .github/scripts/check_duplicate_trips.py
 
   # pg8000 asks only for scramp>=1.4.5, so a scramp release can break a pinned
@@ -139,6 +140,22 @@ jobs:
         run: pip install -r requirements.txt
       - name: Check the Postgres driver fits its SCRAM dependency
         run: python .github/scripts/check_db_driver.py
+
+  # An API key is a credential that outlives the session that created it, so
+  # what makes it narrower than a password is the whole point -- that it is
+  # hashed, never rendered, scoped to its owner, revocable, and explicitly not
+  # a session. Every one of those fails silently if it breaks.
+  api-keys:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Check the trip API keys
+        run: python .github/scripts/check_api_keys.py
 
   # CI has no DATABASE_URL, so a plain `import app` always falls back to
   # SQLite and never exercises the pg8000 connection or the Postgres branch

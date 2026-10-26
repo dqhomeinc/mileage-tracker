@@ -145,6 +145,50 @@
     }
     .copy-btn:hover { color: var(--primary); }
 
+    .key-list { margin: 0 0 16px; padding: 0; list-style: none; }
+    .key-row {
+      display: flex; align-items: flex-start; gap: 10px;
+      padding: 11px 0; border-top: 1px solid var(--border);
+    }
+    .key-row:last-child { border-bottom: 1px solid var(--border); }
+    .key-row.revoked { opacity: .55; }
+    .key-row-main { flex: 1; min-width: 0; }
+    .key-row-name { font-weight: 600; font-size: .9rem; word-break: break-word; }
+    .key-row-meta { font-size: .76rem; color: var(--muted); margin-top: 2px; line-height: 1.5; }
+    .key-row-id {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: .74rem; color: var(--muted);
+    }
+    .key-revoke {
+      background: none; border: 1.5px solid var(--border); border-radius: var(--radius-sm);
+      color: var(--muted); font-size: .76rem; font-weight: 600; cursor: pointer;
+      padding: 5px 10px; font-family: 'Inter', sans-serif; flex-shrink: 0;
+    }
+    .key-revoke:hover { border-color: #EF4444; color: #EF4444; }
+    .key-revoke:disabled { opacity: .5; cursor: not-allowed; }
+    .key-revoked-tag { font-size: .74rem; color: var(--muted); flex-shrink: 0; padding: 5px 0; }
+    .key-empty { font-size: .84rem; color: var(--muted); margin-bottom: 16px; }
+    /* The one-time reveal. Deliberately loud: it is the only time the key is
+       ever shown, and a user who closes the page without copying it has to
+       revoke and start again. */
+    .key-reveal {
+      border: 1.5px solid var(--primary); border-radius: var(--radius-sm);
+      background: #EEF2FF; padding: 14px; margin-bottom: 16px;
+    }
+    .key-reveal-title { font-size: .84rem; font-weight: 700; color: var(--primary); margin-bottom: 8px; }
+    .key-reveal-value {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: .8rem; word-break: break-all; background: white;
+      border: 1px solid var(--border); border-radius: 8px; padding: 10px;
+      margin-bottom: 10px;
+    }
+    .key-setup {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: .72rem; line-height: 1.6; white-space: pre-wrap; word-break: break-word;
+      background: #0F172A; color: #E2E8F0; border-radius: 8px;
+      padding: 12px; margin-top: 10px; max-height: 320px; overflow: auto;
+    }
+
     .form-msg { font-size: .82rem; margin-top: 4px; margin-bottom: 14px; display: none; }
     .form-msg.show { display: block; }
     .form-msg.error { color: #EF4444; }
@@ -230,6 +274,54 @@
       <button class="btn-save" id="revealKeyBtn" onclick="revealLoggingKey()">Show My Key</button>
       <button class="btn-ghost" id="regenKeyBtn" onclick="regenerateLoggingKey()">Generate a New Key</button>
     </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-heading">
+      <div class="panel-heading-icon"><i class="fas fa-plug"></i></div>
+      API Keys
+    </div>
+
+    <p class="key-note">
+      An API key lets a script or an assistant log trips for you
+      <strong>without your password</strong>. A key can create trips and read
+      your vehicles and businesses — it cannot read, edit or delete trips, reach
+      your account details, or sign in to this site.
+      Revoke one any time; nothing else about your account changes.
+    </p>
+
+    <div class="form-msg" id="apiKeyMsg"></div>
+
+    <div class="key-reveal d-none" id="keyReveal">
+      <div class="key-reveal-title">
+        <i class="fas fa-triangle-exclamation"></i>
+        Copy this now — it is not shown again
+      </div>
+      <div class="key-reveal-value" id="keyRevealValue"></div>
+      <button class="btn-ghost" type="button" onclick="copyApiKey()">Copy key</button>
+      <button class="btn-ghost" type="button" onclick="copyApiSetup()">Copy setup for your agent</button>
+      <div class="key-setup" id="keySetup"></div>
+    </div>
+
+    <ul class="key-list" id="keyList"></ul>
+    <div class="key-empty d-none" id="keyEmpty">You have no API keys.</div>
+
+    <div class="field">
+      <label for="apiKeyName">Key Name</label>
+      <input type="text" id="apiKeyName" maxlength="60" autocomplete="off"
+             placeholder="What will use this key?">
+    </div>
+    <div class="field">
+      <label for="apiKeyPassword">Confirm Your Password</label>
+      <div class="pw-wrap">
+        <input type="password" id="apiKeyPassword" placeholder="••••••••"
+               autocomplete="current-password">
+        <button type="button" class="pw-toggle" onclick="togglePw(this)" tabindex="-1" aria-label="Toggle password visibility">
+          <i class="fas fa-eye"></i>
+        </button>
+      </div>
+    </div>
+    <button class="btn-save" id="createKeyBtn" onclick="createApiKey()">Create a Key</button>
   </div>
 
   <div class="panel">
@@ -503,6 +595,171 @@ async function copyLoggingKey() {
     setKeyMsg('Could not copy automatically — select the key above instead.', 'error');
   }
 }
+
+
+// ─── API keys ───────────────────────────────────────────────────────────────
+// The full key exists in this page for exactly as long as the tab stays open
+// after minting. It is never stored and never re-sent, so it is deliberately
+// not written to localStorage or re-rendered on reload — a user who loses it
+// revokes and mints another, which is why minting is cheap.
+
+let apiKeys = {{ api_keys|tojson }};
+const API_BASE = {{ api_base_url|tojson }};
+let lastMintedKey = null;
+
+function setApiKeyMsg(text, kind) {
+  const el = document.getElementById('apiKeyMsg');
+  el.classList.remove('show', 'error', 'success');
+  if (!text) return;
+  el.textContent = text;
+  el.classList.add('show', kind);
+}
+
+function renderApiKeys() {
+  const list = document.getElementById('keyList');
+  document.getElementById('keyEmpty').classList.toggle('d-none', apiKeys.length > 0);
+  list.innerHTML = apiKeys.map(k => {
+    const meta = [
+      k.created_at ? `Created ${escHtml(k.created_at)}` : null,
+      // "Never used" is the useful reading of a null here: a key nothing has
+      // picked up is either not handed over yet or forgotten.
+      k.last_used_at ? `last used ${escHtml(k.last_used_at)}` : 'never used',
+    ].filter(Boolean).join(' · ');
+    const action = k.active
+      ? `<button class="key-revoke" onclick="revokeApiKey(${k.id}, this)">Revoke</button>`
+      : `<span class="key-revoked-tag">Revoked</span>`;
+    return `<li class="key-row ${k.active ? '' : 'revoked'}">
+      <div class="key-row-main">
+        <div class="key-row-name">${escHtml(k.name)}</div>
+        <div class="key-row-meta">${meta}</div>
+        <div class="key-row-id">${escHtml(k.public_id)}</div>
+      </div>
+      ${action}
+    </li>`;
+  }).join('');
+}
+
+// Everything the person handing this to an agent needs, with their own base
+// URL filled in, so they pass on something complete instead of paraphrasing.
+function setupBlock(fullKey) {
+  return [
+    `Base URL: ${API_BASE}`,
+    `Key:      ${fullKey}`,
+    '',
+    'POST /api/v1/trips',
+    'Authorization: Bearer <key>',
+    'Content-Type: application/json',
+    '',
+    '{ "start_location": "Lexington, MA",',
+    '  "end_location":   "Clinton Street, Newton",',
+    '  "started_at":     "2026-10-08T08:29",',
+    '  "ended_at":       "2026-10-08T09:10",',
+    '  "notes":          "business site visit",',
+    '  "vehicle_id":     1 }',
+    '',
+    'GET /api/v1/vehicles    - vehicle ids for vehicle_id',
+    'GET /api/v1/businesses  - business ids for business_id',
+    '',
+    'Notes for whoever is calling this:',
+    '- Local wall-clock times only. A UTC offset is refused, because trips',
+    '  are stored as local time and there is no timezone to convert from.',
+    '- Distance is measured server-side. "miles" is optional and used only',
+    '  if measuring fails.',
+    '- The server sleeps when idle, so the first call after a quiet period',
+    '  can take about 60s. Allow a 90s timeout and do not retry on timeout:',
+    '  the request has usually landed, and retrying logs the trip twice.',
+    '- 201 created, 401 bad key, 422 bad payload (the message names the field).',
+  ].join('\n');
+}
+
+async function createApiKey() {
+  const nameEl = document.getElementById('apiKeyName');
+  const pwEl = document.getElementById('apiKeyPassword');
+  const btn = document.getElementById('createKeyBtn');
+  setApiKeyMsg('');
+
+  if (!nameEl.value.trim()) {
+    setApiKeyMsg('Give the key a name, so you can tell it apart later.', 'error');
+    nameEl.focus();
+    return;
+  }
+  if (!pwEl.value) {
+    setApiKeyMsg('Enter your password to create a key.', 'error');
+    pwEl.focus();
+    return;
+  }
+
+  btn.disabled = true;
+  const original = btn.textContent;
+  btn.textContent = 'Creating…';
+  try {
+    const resp = await fetch('/profile/api-keys', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: nameEl.value, password: pwEl.value })
+    });
+    const data = await resp.json();
+    if (!resp.ok) { setApiKeyMsg(data.error || 'Could not create a key.', 'error'); return; }
+
+    lastMintedKey = data.key;
+    document.getElementById('keyRevealValue').textContent = data.key;
+    document.getElementById('keySetup').textContent = setupBlock(data.key);
+    document.getElementById('keyReveal').classList.remove('d-none');
+
+    apiKeys.unshift(data.api_key);
+    renderApiKeys();
+    setApiKeyMsg('Key created. Copy it now — it is not shown again.', 'success');
+    nameEl.value = '';
+    pwEl.value = '';
+  } catch {
+    setApiKeyMsg('Network error. Could not create a key.', 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = original;
+  }
+}
+
+async function revokeApiKey(id, btn) {
+  const key = apiKeys.find(k => k.id === id);
+  if (!confirm(`Revoke "${key ? key.name : 'this key'}"?\n\nAnything using it stops working on its next request. This cannot be undone.`)) return;
+  setApiKeyMsg('');
+  btn.disabled = true;
+  btn.textContent = 'Revoking…';
+  try {
+    const resp = await fetch(`/profile/api-keys/${id}`, { method: 'DELETE' });
+    const data = await resp.json();
+    if (!resp.ok) { setApiKeyMsg(data.error || 'Could not revoke that key.', 'error'); return; }
+    const i = apiKeys.findIndex(k => k.id === id);
+    if (i >= 0) apiKeys[i] = data.api_key;
+    renderApiKeys();
+    setApiKeyMsg('Key revoked.', 'success');
+  } catch {
+    setApiKeyMsg('Network error. Could not revoke that key.', 'error');
+    btn.disabled = false;
+    btn.textContent = 'Revoke';
+  }
+}
+
+async function copyToClipboard(text, okMessage) {
+  try {
+    await navigator.clipboard.writeText(text);
+    setApiKeyMsg(okMessage, 'success');
+  } catch {
+    // Clipboard access needs a secure context and permission, and is simply
+    // absent in some in-app browsers. Both values are on screen either way.
+    setApiKeyMsg('Could not copy automatically — select the text above instead.', 'error');
+  }
+}
+
+const copyApiKey = () => copyToClipboard(lastMintedKey || '', 'Key copied.');
+const copyApiSetup = () => copyToClipboard(setupBlock(lastMintedKey || ''), 'Setup copied.');
+
+function escHtml(str) {
+  return String(str ?? '').replace(/[&<>"']/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+renderApiKeys();
 
 
 async function changePassword() {
