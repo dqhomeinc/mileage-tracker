@@ -403,6 +403,16 @@
     }
     .form-input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(79,70,229,.12); }
     .vehicle-hint { font-size: .75rem; color: var(--muted); margin-top: 4px; min-height: 16px; }
+    /* Marks a trip an API key logged. Only the unusual case is badged: web
+       trips are the norm, and trips predating the column have no value. */
+    .api-badge {
+      display: inline-flex; align-items: center; gap: 4px;
+      font-size: .64rem; font-weight: 700; letter-spacing: .04em;
+      text-transform: uppercase; color: var(--primary);
+      background: #EEF2FF; border: 1px solid #DDD6FE;
+      border-radius: 999px; padding: 1px 7px; margin-left: 6px;
+      vertical-align: middle; white-space: nowrap;
+    }
     /* The logging key is eight characters read off the profile page and typed
        back, so it gets a monospace field wide enough to see all of them and
        letter-spacing that makes the groups countable. */
@@ -2901,6 +2911,11 @@ function prependTripRow(trip, prepend = true) {
   const dateTxt = trip.trip_date
     ? formatTripDate(trip.trip_date)
     : escHtml((trip.timestamp || '').replace(/\s+\d{1,2}:\d{2}\s*[AP]M$/i, '').trim());
+  // Named in the title rather than the badge so a long key name cannot push
+  // the row's layout around on a phone.
+  const apiBadge = trip.via_api
+    ? `<span class="api-badge" title="Logged by API key${trip.via_api_key ? ': ' + escHtml(trip.via_api_key) : ''}"><i class="fas fa-plug"></i> API</span>`
+    : '';
 
   const row = document.createElement('div');
   row.className = trip.miles == null ? 'trip-row trip-row-pending' : 'trip-row';
@@ -2925,7 +2940,7 @@ function prependTripRow(trip, prepend = true) {
   row.dataset.endPlaceId   = trip.end_place_id   || '';
   row.innerHTML = `
     <div class="trip-date">
-      <div class="trip-date-main">${dateTxt}</div>
+      <div class="trip-date-main">${dateTxt}${apiBadge}</div>
       <div class="trip-time-display trip-sub" data-raw-start="${escHtml(trip.start_time||'')}" data-raw-end="${escHtml(trip.end_time||'')}" data-trip-date="${escHtml(trip.trip_date||'')}" data-end-date="${escHtml(trip.end_date||'')}">${timeRangeTxt}</div>
     </div>
     <div class="trip-loc">

@@ -13,6 +13,7 @@ one of them fails silently:
   - minting costs the account password; revoking deliberately does not
   - distance is measured rather than taken from the request
   - a key's requests are bounded, including the ones that fail validation
+  - a trip logged by a key is identifiable as such afterwards, by which key
 
 Run as a script so it fits the other checks in this directory; no test runner.
 """
@@ -381,6 +382,49 @@ with main.app.app_context():
     expect('a revoked key is rejected before it can spend anything',
            main.ApiKey.query.filter_by(id=revoked['api_key']['id']).first().window_count,
            None)
+
+# ── The audit trail ────────────────────────────────────────────────
+# The point of a key being narrow is undermined if nobody can tell afterwards
+# what it did. A trip has to be traceable to the key that logged it, and to
+# stay traceable after that key is revoked.
+audited = mint(jane_client, name='auditor').get_json()
+made = anon.post('/api/v1/trips', headers=auth(audited['key']), json=BODY)
+AUDIT_TRIP = made.get_json()['id']
+
+with main.app.app_context():
+    trip = main.db.session.get(main.Trip, AUDIT_TRIP)
+    expect('an API-logged trip records that it came from the API',
+           trip.created_via, 'api')
+    expect('and which key logged it',
+           trip.created_by_key_id, audited['api_key']['id'])
+
+rows = {t['id']: t for t in jane_client.get('/history').get_json()}
+expect('the history marks it', rows[AUDIT_TRIP]['via_api'], True)
+expect('and names the key', rows[AUDIT_TRIP]['via_api_key'], 'auditor')
+
+# Revoking must not erase the attribution: "logged by a key, since revoked" is
+# exactly what someone reviewing the log needs.
+jane_client.delete(f"/profile/api-keys/{audited['api_key']['id']}")
+rows = {t['id']: t for t in jane_client.get('/history').get_json()}
+expect('revoking the key leaves the trip attributed to it',
+       rows[AUDIT_TRIP]['via_api_key'], 'auditor')
+expect('and still marked as API-logged', rows[AUDIT_TRIP]['via_api'], True)
+
+# A form-logged trip is distinguishable, which is the other half of the point.
+logging_key = main.normalize_logging_key(
+    jane_client.post('/profile/logging-key', json={'password': PASSWORD})
+    .get_json()['logging_key'])
+web = jane_client.post('/log', json={'start': 'C', 'end': 'D',
+                                     'trip_date': '2026-10-08',
+                                     'logging_key': logging_key})
+expect('a form-logged trip still logs', web.status_code, 200)
+WEB_TRIP = web.get_json()['trip']['id']
+rows = {t['id']: t for t in jane_client.get('/history').get_json()}
+expect('and is not marked as API-logged', rows[WEB_TRIP]['via_api'], False)
+expect('with no key attributed', rows[WEB_TRIP]['via_api_key'], None)
+with main.app.app_context():
+    expect('recorded as coming from the web',
+           main.db.session.get(main.Trip, WEB_TRIP).created_via, 'web')
 
 measure_patch.stop()
 os.unlink(_db.name)
