@@ -196,6 +196,11 @@ class ApiKey(db.Model):
     # be shown -- "this key was being used until Tuesday" is the useful fact
     # after revoking one.
     revoked_at = db.Column(db.DateTime, nullable=True)
+    # A fixed-window request counter, held on the key itself rather than in a
+    # table of requests. The row is already loaded to authenticate, so counting
+    # here costs no extra query and nothing accumulates to prune.
+    window_started_at = db.Column(db.DateTime, nullable=True)
+    window_count = db.Column(db.Integer, nullable=True)
 
     @property
     def active(self):
@@ -418,6 +423,26 @@ def _migrate_db():
             conn.execute(db.text('ALTER TABLE "user" ADD COLUMN default_vehicle_id INTEGER'))
         if 'default_business_id' not in existing_user_cols:
             conn.execute(db.text('ALTER TABLE "user" ADD COLUMN default_business_id INTEGER'))
+        # api_key is a new table, so db.create_all() builds it complete -- but a
+        # deployment that already ran the first version of it has the table
+        # without these two columns, which create_all() will not add.
+        if dialect == 'sqlite':
+            result = conn.execute(db.text('PRAGMA table_info(api_key)'))
+            existing_key_cols = {row[1] for row in result}
+        else:
+            result = conn.execute(db.text(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'api_key'"
+            ))
+            existing_key_cols = {row[0] for row in result}
+        # Empty when the table does not exist yet, in which case create_all()
+        # has already made it with both columns and there is nothing to add.
+        if existing_key_cols:
+            if 'window_started_at' not in existing_key_cols:
+                conn.execute(db.text('ALTER TABLE api_key ADD COLUMN window_started_at TIMESTAMP'))
+            if 'window_count' not in existing_key_cols:
+                conn.execute(db.text('ALTER TABLE api_key ADD COLUMN window_count INTEGER'))
+
         if 'logging_key' not in existing_user_cols:
             conn.execute(db.text('ALTER TABLE "user" ADD COLUMN logging_key VARCHAR(32)'))
         if 'key_reveal_fails' not in existing_user_cols:
@@ -2488,6 +2513,48 @@ def _api_key_from_request():
     return key
 
 
+# How many requests one key may make per window. An assistant logging a handful
+# of trips a day is nowhere near this; it exists to bound a runaway loop or a
+# key being used by something other than what it was issued to.
+#
+# A fixed window rather than a sliding one: the worst case is twice the limit
+# across a boundary, which at this size is not worth a table of timestamps to
+# avoid. Counted on the key's own row, so it costs no query the authentication
+# did not already make and leaves nothing to prune.
+API_RATE_LIMIT = 60
+API_RATE_WINDOW = timedelta(hours=1)
+
+
+def _count_api_request(key):
+    """Record this request against the key's window and return the new count.
+
+    One UPDATE, which decides in SQL whether the window has rolled over. Read,
+    increment and write back would let concurrent requests all read the same
+    count and all write the same value, so a burst would be counted as one.
+    """
+    now = _utcnow()
+    cutoff = now - API_RATE_WINDOW
+    rolled_over = db.or_(ApiKey.window_started_at.is_(None),
+                         ApiKey.window_started_at < cutoff)
+    db.session.execute(
+        db.update(ApiKey)
+        .where(ApiKey.id == key.id)
+        .values(
+            window_started_at=db.case((rolled_over, now), else_=ApiKey.window_started_at),
+            window_count=db.case((rolled_over, 1),
+                                 else_=db.func.coalesce(ApiKey.window_count, 0) + 1),
+            # Folded into the same statement rather than assigned separately, so
+            # one write records both and neither can be left behind.
+            last_used_at=now,
+        )
+    )
+    db.session.commit()
+    # Read back rather than trusting the loaded attribute, which the SQL-side
+    # update left stale.
+    return (db.session.query(ApiKey.window_count)
+            .filter(ApiKey.id == key.id).scalar() or 0)
+
+
 def api_key_required(view):
     """Authenticate by API key, or refuse.
 
@@ -2499,6 +2566,11 @@ def api_key_required(view):
     def wrapped(*args, **kwargs):
         key = _api_key_from_request()
         if not key:
+            # Not rate-limited, deliberately. A rejected request costs one
+            # indexed lookup and one SHA-256, both cheap -- the reason to
+            # throttle failed authentication is usually that verifying a
+            # credential is expensive, and here it is not. The secret itself is
+            # 256 random bits, so there is no guessing to slow down either.
             # One message for a missing, malformed, unknown and revoked key
             # alike. Distinguishing them would tell someone probing which of
             # their guesses had named a real key.
@@ -2508,11 +2580,18 @@ def api_key_required(view):
         if not user:
             return jsonify({'error': 'Invalid or missing API key.'}), 401
 
-        # Recorded before the work, so a request that fails validation still
-        # shows the key as used -- the question this answers is "is something
-        # using this key", not "is it succeeding".
-        key.last_used_at = _utcnow()
-        db.session.commit()
+        # Counted before the work, so a request that fails validation still
+        # shows the key as used and still spends its budget -- the question
+        # last_used answers is "is something using this key", not "is it
+        # succeeding", and a loop sending malformed bodies is exactly what the
+        # limit is for.
+        used = _count_api_request(key)
+        if used > API_RATE_LIMIT:
+            minutes = max(1, int(API_RATE_WINDOW.total_seconds() // 60))
+            return jsonify({
+                'error': f'Rate limit exceeded: at most {API_RATE_LIMIT} requests '
+                         f'per {minutes} minutes for this key.'
+            }), 429
 
         g.api_key = key
         g.api_user = user
