@@ -15,6 +15,7 @@ one of them fails silently:
 
 Run as a script so it fits the other checks in this directory; no test runner.
 """
+import math
 import os
 import re
 import sys
@@ -32,12 +33,42 @@ failures = []
 PASSWORD = 'Testpass123!'
 
 
+def field(resp, name, default=None):
+    """One field from a JSON response, or `default` if it has no such field.
+
+    Never a direct subscript on resp.get_json(). A check that expected one
+    shape and got another reads whatever actually came back: a success body
+    that is a list, or a 500 whose body is HTML so get_json() is None. Both
+    raise, and a raise here aborts the script and silently skips every later
+    check -- which is how a run can look shorter than it is. Every response
+    read in this file goes through here for that reason.
+    """
+    try:
+        body = resp.get_json()
+    except Exception:  # noqa: BLE001 -- a non-JSON body simply has no fields
+        return default
+    if not isinstance(body, dict):
+        return default
+    return body.get(name, default)
+
+
+def err(resp):
+    """The error message from a response, or '' if it has none."""
+    return field(resp, 'error', '')
+
+
 def expect(label, actual, wanted):
     if actual != wanted:
         failures.append(f'{label}: expected {wanted!r}, got {actual!r}')
 
 
 main.app.config['TESTING'] = True
+# TESTING alone makes Flask re-raise a view's exception instead of returning
+# 500, so a check asserting "the client gets a sensible response" would crash
+# on the very bug it is looking for rather than reporting it. Turning
+# propagation off makes the client see what a real client would: a 500, which
+# then reads as a named failure beside the others.
+main.app.config['PROPAGATE_EXCEPTIONS'] = False
 with main.app.app_context():
     main.db.create_all()
     for name in ('jane', 'bob'):
@@ -94,12 +125,12 @@ expect('an anonymous caller cannot mint',
 
 minted = mint(jane_client)
 expect('minting with the right password works', minted.status_code, 200)
-JANE_KEY = minted.get_json()['key']
-JANE_KEY_ID = minted.get_json()['api_key']['id']
+JANE_KEY = field(minted, 'key')
+JANE_KEY_ID = (field(minted, 'api_key') or {})['id']
 expect('the key has the documented shape',
        bool(re.fullmatch(r'mtk_[0-9a-f]{12}\.[A-Za-z0-9_-]{40,}', JANE_KEY)), True)
 expect('the response does not echo the secret under another name',
-       'secret' in str(minted.get_json().get('api_key', {})).lower(), False)
+       'secret' in str((field(minted, 'api_key') or {})).lower(), False)
 
 # ── The secret is never stored, and never rendered ──────────────────────
 JANE_SECRET = JANE_KEY.split('.', 1)[1]
@@ -146,7 +177,7 @@ BODY = {'start_location': 'Lexington, MA', 'end_location': 'Newton, MA',
 
 created = anon.post('/api/v1/trips', headers=auth(JANE_KEY), json=BODY)
 expect('a trip is created', created.status_code, 201)
-TRIP_ID = created.get_json().get('id')
+TRIP_ID = field(created, 'id')
 with main.app.app_context():
     trip = main.db.session.get(main.Trip, TRIP_ID)
     expect('for the key\'s owner', trip.user_id, JANE_ID)
@@ -160,7 +191,7 @@ with main.app.app_context():
 supplied = anon.post('/api/v1/trips', headers=auth(JANE_KEY),
                      json={**BODY, 'miles': 999.0})
 expect('a supplied mileage does not override the measurement',
-       supplied.get_json().get('miles'), MEASURED[0])
+       field(supplied, 'miles'), MEASURED[0])
 
 # ...but is used when measuring produces nothing, which is the whole point of
 # keeping it in the contract.
@@ -169,25 +200,61 @@ with patch.object(main, 'calculate_driving_miles', side_effect=RuntimeError('no 
     fell_back = anon.post('/api/v1/trips', headers=auth(JANE_KEY),
                           json={**BODY, 'miles': 8.47})
     expect('a supplied mileage is used when measuring fails',
-           fell_back.get_json().get('miles'), 8.47)
+           field(fell_back, 'miles'), 8.47)
     no_value = anon.post('/api/v1/trips', headers=auth(JANE_KEY), json=BODY)
     expect('and a trip with neither is still recorded, without a distance',
-           (no_value.status_code, no_value.get_json().get('miles')), (201, None))
+           (no_value.status_code, field(no_value, 'miles')), (201, None))
 measure_patch.start()
+
+# ── Numbers arriving as JSON ──────────────────────────────────────────
+# This endpoint takes arbitrary JSON, so float() and int() on its values are
+# not conversions but trust. json parses the bare NaN and Infinity literals,
+# and a NaN stored as a mileage poisons every total it is summed into -- then
+# jsonify emits it back as a bare NaN, which is not valid JSON at all, so the
+# history stops parsing rather than showing a wrong number.
+with patch.object(main, 'calculate_driving_miles', side_effect=RuntimeError('no route')):
+    for bad, label in ((float('nan'), 'NaN'), (float('inf'), 'Infinity'),
+                       ('nan', 'the string "nan"'), ('inf', 'the string "inf"'),
+                       (-5, 'a negative mileage'), (10 ** 9, 'an absurd mileage'),
+                       ('abc', 'a non-numeric mileage'), ([1], 'a list')):
+        resp = anon.post('/api/v1/trips', headers=auth(JANE_KEY),
+                         json={**BODY, 'miles': bad})
+        expect(f'{label} is refused rather than stored', resp.status_code, 422)
+
+    # And nothing non-finite reached the database on the way to being refused.
+    with main.app.app_context():
+        stored = [t.distance_miles for t in main.Trip.query.all()
+                  if t.distance_miles is not None]
+        expect('no stored mileage is non-finite',
+               all(math.isfinite(m) for m in stored), True)
+        expect('and none is negative', all(m >= 0 for m in stored), True)
+
+# An id that is not an id must drop the attribution, not return a 500.
+for bad, label in (('abc', 'a non-numeric vehicle_id'), ('1.5', 'a fractional id'),
+                   ([1], 'a list as an id'), (True, 'a boolean as an id')):
+    resp = anon.post('/api/v1/trips', headers=auth(JANE_KEY),
+                     json={**BODY, 'vehicle_id': bad})
+    expect(f'{label} does not crash the request', resp.status_code, 201)
+    expect(f'{label} attaches no vehicle', field(resp, 'vehicle'), None)
+
+resp = anon.post('/api/v1/trips', headers=auth(JANE_KEY),
+                 json={**BODY, 'business_id': 'abc'})
+expect('a non-numeric business_id does not crash either', resp.status_code, 201)
+expect('and attaches no business', field(resp, 'business'), None)
 
 # ── The payload contract ──────────────────────────────────────────────
 old_spec = anon.post('/api/v1/trips', headers=auth(JANE_KEY),
                      json={'start': 'a', 'end': 'b', 'from': 'c', 'to': 'd'})
 expect('the earlier draft\'s field names are refused', old_spec.status_code, 422)
 expect('and the error says which fields to use instead',
-       'started_at' in old_spec.get_json()['error'], True)
+       'started_at' in field(old_spec, 'error'), True)
 expect('and explains the collision rather than only listing fields',
-       'locations here' in old_spec.get_json()['error'], True)
+       'locations here' in field(old_spec, 'error'), True)
 
 tz = anon.post('/api/v1/trips', headers=auth(JANE_KEY),
                json={**BODY, 'started_at': '2026-10-08T08:29+00:00'})
 expect('an offset-aware datetime is refused rather than converted', tz.status_code, 422)
-expect('and says why', 'local' in tz.get_json()['error'], True)
+expect('and says why', 'local' in field(tz, 'error'), True)
 
 for bad, label in (({**BODY, 'start_location': ''}, 'a blank start location'),
                    ({**BODY, 'started_at': 'yesterday'}, 'an unparseable datetime'),
@@ -206,11 +273,10 @@ expect('while /log still does',
                                       'trip_date': '2026-10-08'}).status_code, 403)
 
 # ── One account's key cannot reach another's ─────────────────────────
-bob_key = mint(bob_client, name='bob script').get_json()['key']
+bob_key = field(mint(bob_client, name='bob script'), 'key')
 expect('a key cannot attach another user\'s vehicle',
-       anon.post('/api/v1/trips', headers=auth(bob_key),
-                 json={**BODY, 'vehicle_id': JANE_VEHICLE}
-                 ).get_json().get('vehicle'), None)
+       field(anon.post('/api/v1/trips', headers=auth(bob_key),
+                       json={**BODY, 'vehicle_id': JANE_VEHICLE}), 'vehicle'), None)
 with main.app.app_context():
     expect('and the trip belongs to the key\'s owner, not the vehicle\'s',
            main.Trip.query.order_by(main.Trip.id.desc()).first().user_id, BOB_ID)
@@ -227,7 +293,7 @@ for label, header in (('a missing header', {}),
     resp = anon.post('/api/v1/trips', headers=header, json=BODY)
     expect(f'{label} is refused', resp.status_code, 401)
     expect(f'{label} gets the same message as any other',
-           resp.get_json().get('error'), 'Invalid or missing API key.')
+           field(resp, 'error'), 'Invalid or missing API key.')
 
 # ── Revoking ───────────────────────────────────────────────────────
 expect('revoking does not need the password',

@@ -3,6 +3,7 @@ from functools import wraps
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
 import secrets
@@ -1284,6 +1285,57 @@ def calculate():
     })
 
 
+# A ceiling on one trip's mileage. Not a judgement about real journeys -- it
+# is three times the circumference of the Earth -- but a mistyped or crafted
+# value has to land somewhere, and an unbounded one flows into every total.
+MAX_TRIP_MILES = 100_000
+
+
+def parse_miles(value):
+    """A finite, non-negative mileage, or raise ValueError. None stays None.
+
+    float() alone is not enough. It accepts 'nan', 'inf' and negatives, and
+    Python's json parses the bare NaN and Infinity literals, so a request can
+    send one straight through. A NaN stored as a trip's mileage then poisons
+    every total it is summed into -- and jsonify would emit it back as a bare
+    NaN, which is not valid JSON, so the history page would fail to parse
+    rather than merely show a wrong number.
+    """
+    if value is None:
+        return None
+    try:
+        miles = float(value)
+    except (TypeError, ValueError):
+        raise ValueError('Mileage must be a number.')
+    if not math.isfinite(miles):
+        raise ValueError('Mileage must be a finite number.')
+    if miles < 0:
+        raise ValueError('Mileage cannot be negative.')
+    if miles > MAX_TRIP_MILES:
+        raise ValueError(f'Mileage must be at most {MAX_TRIP_MILES:,} miles.')
+    return miles
+
+
+def _as_id(value):
+    """An integer id from client input, or None if it is not one.
+
+    None rather than an exception, because every caller already treats an id it
+    cannot resolve as "no attribution" -- a bad vehicle id should drop the
+    vehicle, not fail the trip. A bare int() raised ValueError on 'abc' or a
+    list, which reached the client as a 500.
+
+    A float is refused rather than truncated: int(1.5) is 1, which would
+    attribute a trip to whichever vehicle happened to have that id.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().lstrip('-').isdigit():
+        return int(value.strip())
+    return None
+
+
 MAX_NOTE_LENGTH = 500
 
 
@@ -1347,9 +1399,10 @@ def _resolve_business_for(user_id, business_id):
     Takes the owner rather than reading current_user because the API routes
     authenticate by key and have no session at all.
     """
+    business_id = _as_id(business_id)
     if not business_id:
         return None, None
-    b = Business.query.filter_by(id=int(business_id), user_id=user_id).first()
+    b = Business.query.filter_by(id=business_id, user_id=user_id).first()
     return (b.id, b.name) if b else (None, None)
 
 
@@ -1360,9 +1413,10 @@ def _resolve_business(business_id):
 
 def _resolve_vehicle_for(user_id, vehicle_id):
     """(id, name, subtitle) for a vehicle `user_id` owns, else (None, None, None)."""
+    vehicle_id = _as_id(vehicle_id)
     if not vehicle_id:
         return None, None, None
-    v = Vehicle.query.filter_by(id=int(vehicle_id), user_id=user_id).first()
+    v = Vehicle.query.filter_by(id=vehicle_id, user_id=user_id).first()
     if not v:
         return None, None, None
     return v.id, v.name, ' '.join(filter(None, [v.year, v.make, v.model]))
@@ -1582,7 +1636,10 @@ def log_trip():
     distance_error   = None
     endpoints        = None
     if distance_miles is not None:
-        distance_miles = float(distance_miles)
+        try:
+            distance_miles = parse_miles(distance_miles)
+        except ValueError as e:
+            return jsonify({'error': str(e)}), 400
     else:
         try:
             distance_miles, duration_seconds, endpoints = calculate_driving_miles(
@@ -1596,10 +1653,10 @@ def log_trip():
         except Exception:
             distance_error = 'Could not calculate distance automatically. Edit this trip to add it later.'
 
-    vehicle_id  = data.get('vehicle_id') or None
+    vehicle_id  = _as_id(data.get('vehicle_id'))
     vehicle_name = vehicle_sub = None
     if vehicle_id:
-        v = Vehicle.query.filter_by(id=int(vehicle_id), user_id=current_user.id).first()
+        v = Vehicle.query.filter_by(id=vehicle_id, user_id=current_user.id).first()
         if v:
             vehicle_name = v.name
             vehicle_sub  = ' '.join(filter(None, [v.year, v.make, v.model]))
@@ -1702,12 +1759,15 @@ def update_trip(trip_id):
     if date_error:
         return jsonify({'error': date_error}), 400
 
-    distance_miles = float(distance_miles) if distance_miles is not None else None
+    try:
+        distance_miles = parse_miles(distance_miles)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
 
-    vehicle_id  = data.get('vehicle_id') or None
+    vehicle_id  = _as_id(data.get('vehicle_id'))
     vehicle_name = vehicle_sub = None
     if vehicle_id:
-        v = Vehicle.query.filter_by(id=int(vehicle_id), user_id=current_user.id).first()
+        v = Vehicle.query.filter_by(id=vehicle_id, user_id=current_user.id).first()
         if v:
             vehicle_name = v.name
             vehicle_sub  = ' '.join(filter(None, [v.year, v.make, v.model]))
@@ -2567,9 +2627,9 @@ def api_create_trip():
         supplied = data.get('miles')
         if supplied is not None:
             try:
-                distance_miles = float(supplied)
-            except (TypeError, ValueError):
-                return jsonify({'error': 'miles must be a number.'}), 422
+                distance_miles = parse_miles(supplied)
+            except ValueError as exc:
+                return jsonify({'error': str(exc)}), 422
 
     # The same cleaner the form path uses, so the two cannot disagree about what
     # a valid note is: over-long notes are truncated rather than refused,
