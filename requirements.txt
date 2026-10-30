@@ -4,8 +4,13 @@ Flask-SQLAlchemy==3.1.1
 requests==2.33.0
 python-dotenv==1.2.2
 gunicorn==22.0.0
-pg8000==1.31.5
+pg8000==1.31.6
 # Transitive deps pinned directly to fixed versions (known CVEs in the
 # versions Flask/requests would otherwise resolve to).
 urllib3==2.8.0
 click==8.3.3
+# pg8000 asks only for scramp>=1.4.5, so a new scramp release is installed
+# without anything here changing. scramp 1.5.0 removed make_channel_binding(),
+# which pg8000 1.31.5 called when a server accepts SSL -- so every deploy
+# started failing with no commit to blame. Pinned so the pair moves together.
+scramp==1.5.0
