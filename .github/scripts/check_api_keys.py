@@ -12,6 +12,7 @@ one of them fails silently:
   - the API does not require the per-trip logging key, and /log still does
   - minting costs the account password; revoking deliberately does not
   - distance is measured rather than taken from the request
+  - a key's requests are bounded, including the ones that fail validation
 
 Run as a script so it fits the other checks in this directory; no test runner.
 """
@@ -327,6 +328,60 @@ with main.app.app_context():
            main.ApiKey.query.filter_by(id=bad_body['api_key']['id']).first().last_used_at
            is not None, True)
 
+# ── The per-key rate limit ──────────────────────────────────────────
+# Bounds a runaway loop or a key being used by something other than what it
+# was issued to. Counted on the key's own row, so these checks also confirm
+# the window rolls over rather than only that a limit exists.
+limited = mint(jane_client, name='busy').get_json()
+LIMITED_KEY = limited['key']
+LIMITED_ID = limited['api_key']['id']
+
+codes = [anon.get('/api/v1/vehicles', headers=auth(LIMITED_KEY)).status_code
+         for _ in range(main.API_RATE_LIMIT)]
+expect('every request up to the limit is served', set(codes), {200})
+
+over = anon.get('/api/v1/vehicles', headers=auth(LIMITED_KEY))
+expect('the next one is refused', over.status_code, 429)
+expect('and says what the limit is',
+       str(main.API_RATE_LIMIT) in err(over), True)
+expect('writing is refused too, not just reading',
+       anon.post('/api/v1/trips', headers=auth(LIMITED_KEY), json=BODY).status_code, 429)
+
+# A different key must have its own budget, or one busy client would stop
+# every other.
+other = mint(jane_client, name='quiet').get_json()['key']
+expect('another key of the same account is unaffected',
+       anon.get('/api/v1/vehicles', headers=auth(other)).status_code, 200)
+
+# The window rolls over rather than locking the key out for ever.
+with main.app.app_context():
+    row = main.ApiKey.query.filter_by(id=LIMITED_ID).first()
+    row.window_started_at = main._utcnow() - main.API_RATE_WINDOW - main.timedelta(minutes=1)
+    main.db.session.commit()
+expect('once the window has passed the key works again',
+       anon.get('/api/v1/vehicles', headers=auth(LIMITED_KEY)).status_code, 200)
+with main.app.app_context():
+    expect('and the count restarted rather than carrying over',
+           main.ApiKey.query.filter_by(id=LIMITED_ID).first().window_count, 1)
+
+# A rejected body still spends budget: a loop sending malformed requests is
+# exactly what the limit is for.
+spender = mint(jane_client, name='malformed').get_json()
+for _ in range(3):
+    anon.post('/api/v1/trips', headers=auth(spender['key']), json={'start': 'x'})
+with main.app.app_context():
+    expect('requests that fail validation are still counted',
+           main.ApiKey.query.filter_by(id=spender['api_key']['id']).first().window_count, 3)
+
+# A revoked key must not be countable at all -- it never reaches the counter.
+revoked = mint(jane_client, name='doomed').get_json()
+jane_client.delete(f"/profile/api-keys/{revoked['api_key']['id']}")
+anon.get('/api/v1/vehicles', headers=auth(revoked['key']))
+with main.app.app_context():
+    expect('a revoked key is rejected before it can spend anything',
+           main.ApiKey.query.filter_by(id=revoked['api_key']['id']).first().window_count,
+           None)
+
 measure_patch.stop()
 os.unlink(_db.name)
 
@@ -337,4 +392,5 @@ if failures:
     sys.exit(1)
 
 print('API key check OK — keys are hashed and never rendered, scoped to their '
-      'owner, not a session, and revocable.')
+      f'owner, not a session, revocable, and capped at {main.API_RATE_LIMIT} '
+      'requests per window.')
