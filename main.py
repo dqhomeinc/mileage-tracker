@@ -270,6 +270,14 @@ class Trip(db.Model):
     # when the log is reviewed months later. Capped in the route rather than by
     # the column type, so the limit can be stated back to the user.
     notes          = db.Column(db.Text, nullable=True)
+    # How the trip was recorded: 'web' for the form, 'api' for a key. Null for
+    # every trip logged before this column existed, which reads as "not known
+    # to be from a key" -- the honest answer, since the API did not exist then.
+    created_via = db.Column(db.String(8), nullable=True)
+    # Which key, so a trip can be traced to one agent when an account has
+    # several. Deliberately not a foreign key: a revoked key's row is kept, but
+    # if one were ever deleted the trips it logged must not go with it.
+    created_by_key_id = db.Column(db.Integer, nullable=True)
     # Intermediate stops between start and end, in the order visited, as a JSON
     # list of {"label", "place_id"}. A column rather than a table: stops are
     # only ever read with their trip, are few, and are ordered, so a join would
@@ -308,6 +316,20 @@ def _business_dict(b, owner=None):
             'is_default': b.id == owner.default_business_id}
 
 
+def _api_key_name_for(trip):
+    """The name of the key that logged this trip, or None.
+
+    Looked up by id rather than joined, because only API-logged trips have one
+    and a history page is mostly web-logged. Returns the name even for a
+    revoked key, which is the point -- "logged by AJ, since revoked" is what
+    someone reviewing the log needs to see.
+    """
+    if not trip.created_by_key_id:
+        return None
+    key = db.session.get(ApiKey, trip.created_by_key_id)
+    return key.name if key else None
+
+
 def _trip_dict(trip, vehicle_name=None, vehicle_sub=None, business_name=None,
                attachments=None):
     """attachments is passed in by callers listing several trips, which fetch
@@ -315,6 +337,11 @@ def _trip_dict(trip, vehicle_name=None, vehicle_sub=None, business_name=None,
     one lookup is done here."""
     return {
         'id':           trip.id,
+        # Only 'api' is surfaced. Older trips have no value and web trips are
+        # the norm, so the history marks what is unusual rather than badging
+        # every row with where it came from.
+        'via_api':      trip.created_via == 'api',
+        'via_api_key':  _api_key_name_for(trip),
         'start':        trip.start_location,
         'end':          trip.end_location,
         'miles':        trip.distance_miles,
@@ -371,6 +398,8 @@ def _migrate_db():
                 ('duration_seconds', 'INTEGER'),
                 ('start_place_id', 'VARCHAR(255)'),
                 ('end_place_id',   'VARCHAR(255)'),
+                ('created_via', 'VARCHAR(8)'),
+                ('created_by_key_id', 'INTEGER'),
             ]
             for col, typ in additions:
                 if col not in existing:
@@ -401,6 +430,8 @@ def _migrate_db():
                 ('duration_seconds', 'INTEGER'),
                 ('start_place_id', 'VARCHAR(255)'),
                 ('end_place_id',   'VARCHAR(255)'),
+                ('created_via', 'VARCHAR(8)'),
+                ('created_by_key_id', 'INTEGER'),
             ]
             for col, typ in additions:
                 if col not in existing:
@@ -1698,6 +1729,7 @@ def log_trip():
 
     trip = Trip(
         user_id=current_user.id,
+        created_via='web',
         start_location=start,
         end_location=end,
         distance_miles=distance_miles,
@@ -2730,6 +2762,8 @@ def api_create_trip():
         stops=json.dumps(stops) if stops else None,
         vehicle_id=vehicle_id,
         business_id=business_id,
+        created_via='api',
+        created_by_key_id=g.api_key.id,
     )
     db.session.add(trip)
     db.session.commit()
