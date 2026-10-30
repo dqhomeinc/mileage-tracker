@@ -140,6 +140,23 @@ jobs:
       - name: Check the Postgres driver fits its SCRAM dependency
         run: python .github/scripts/check_db_driver.py
 
+  # Without a limit the password is not a boundary, only slow. The properties
+  # that make a limit real -- that it holds against the correct password, that
+  # it reveals nothing about which addresses exist, and that one address being
+  # limited does not limit everyone -- are each a line of code and none of them
+  # are visible in review.
+  login-rate-limit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Check login attempts are bounded
+        run: python .github/scripts/check_login_rate_limit.py
+
   # CI has no DATABASE_URL, so a plain `import app` always falls back to
   # SQLite and never exercises the pg8000 connection or the Postgres branch
   # of _migrate_db() — both of which production actually depends on.
