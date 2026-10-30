@@ -5,19 +5,9 @@ request time, not import time.
 """
 import sys
 
-from jinja2 import Environment, FileSystemLoader, TemplateError
+from jinja2 import Environment, FileSystemLoader
 
-TEMPLATES_WITH_CONTEXT = {
-    'register.html': {},
-    'login.html': {},
-    'forgot_password.html': {},
-    'reset_password.html': {'token': 'dummy-token'},
-    'index.html': {'username': 'tester', 'photo_data': None,
-                   'maps_browser_key': 'test-browser-key'},
-    'vehicles.html': {'username': 'tester', 'photo_data': None},
-    'businesses.html': {'username': 'tester', 'photo_data': None},
-    'profile.html': {'username': 'tester', 'email': 't@example.com', 'photo_data': None},
-}
+from template_context import TEMPLATES_WITH_CONTEXT  # noqa: E402
 
 env = Environment(loader=FileSystemLoader('templates'))
 # Flask injects this automatically at request time; stub it for standalone
@@ -32,8 +22,12 @@ for name, context in TEMPLATES_WITH_CONTEXT.items():
         ctx = {**context, **({'photo_data': photo} if 'photo_data' in context else {})}
         try:
             env.get_template(name).render(**ctx, show_time_toggle=True)
-        except TemplateError as e:
-            failures.append(f'{name} (photo_data={photo!r}): {e}')
+        except Exception as e:  # noqa: BLE001 — reporting, not handling
+            # Not just TemplateError. A filter can raise something else
+            # entirely -- |tojson on an undefined variable raises TypeError --
+            # and catching only Jinja's own errors let that abort the script
+            # with a traceback, taking every template after it unchecked.
+            failures.append(f'{name} (photo_data={photo!r}): {type(e).__name__}: {e}')
 
 if failures:
     print('Template render check FAILED:')

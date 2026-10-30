@@ -24,10 +24,19 @@ import re
 import sys
 from importlib.metadata import version
 
-import pg8000.core
-import scramp
-
 failures = []
+
+# Imported defensively, so a missing driver reads as a named failure rather
+# than a traceback that takes the rest of the script with it. In CI both are
+# always installed from requirements.txt; locally they may not be.
+try:
+    import pg8000.core
+    import scramp
+except ImportError as exc:
+    print('Database driver check FAILED:')
+    print(f'  - could not import the driver or its SCRAM dependency ({exc}). '
+          'Install from requirements.txt first.')
+    sys.exit(1)
 
 
 def pinned(requirement):
