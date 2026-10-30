@@ -16,6 +16,13 @@ pinned by committing something. This asserts it exists and matches what the
 workflows test on, because the value of pinning it is entirely that the two
 agree.
 
+The two ways of pinning have different format rules, which is worth keeping
+straight because getting either wrong is silent. In the file the patch version
+is optional -- Render then takes the latest patch of that line, as setup-python
+does in CI. In the PYTHON_VERSION environment variable it is not: that route
+requires a fully qualified version, so render.yaml's declaration is checked for
+one even though this service does not currently apply that file.
+
 Run as a script so it fits the other checks in this directory; no test runner.
 """
 import pathlib
@@ -67,10 +74,20 @@ render_yaml = pathlib.Path('render.yaml')
 if render_yaml.exists() and pinned:
     declared = re.search(r'key:\s*PYTHON_VERSION\s*\n\s*value:\s*([\d.]+)',
                          render_yaml.read_text())
-    if declared and declared.group(1).split('.')[:2] != pinned.split('.')[:2]:
-        failures.append(f'render.yaml declares PYTHON_VERSION '
-                        f'{declared.group(1)} but .python-version pins {pinned}; '
-                        'whichever is applied, they should not disagree')
+    if declared:
+        value = declared.group(1)
+        if value.split('.')[:2] != pinned.split('.')[:2]:
+            failures.append(f'render.yaml declares PYTHON_VERSION {value} but '
+                            f'.python-version pins {pinned}; whichever is '
+                            'applied, they should not disagree')
+        # The environment-variable route requires a fully qualified version,
+        # unlike the file. A partial one there is accepted by nothing and fails
+        # quietly, so it is checked here even though this service does not
+        # currently apply render.yaml at all.
+        if not re.fullmatch(r'\d+\.\d+\.\d+', value):
+            failures.append(f'render.yaml declares PYTHON_VERSION {value}, but '
+                            'that route needs a fully qualified version such as '
+                            '3.11.9 -- a partial one is silently not applied')
 
 if failures:
     print('Python version check FAILED:')
