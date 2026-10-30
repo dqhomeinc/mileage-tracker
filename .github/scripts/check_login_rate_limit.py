@@ -27,6 +27,15 @@ sys.path.insert(0, os.getcwd())
 
 import main  # noqa: E402
 
+
+# Registered here, before any request is made: Flask refuses to add a route
+# once the app has served one. It reports only what the app believes about the
+# request, so the per-IP limit can be checked against the address it is keyed
+# on rather than the one the test client happens to send.
+@main.app.route('/__check_remote_addr')
+def _report_addr():
+    return {'addr': main.request.remote_addr}
+
 failures = []
 PASSWORD = 'Testpass123!'
 WRONG = 'Wrongpass123!'
@@ -171,6 +180,35 @@ with main.app.app_context():
     remaining = main.db.session.query(main.LoginAttempt).count()
 expect('and writing prunes them rather than letting the table grow',
        remaining, 1)
+
+# ── The address the limit is keyed on ──────────────────────────────────
+# The per-IP limit is only per-IP if remote_addr is the client. Behind a proxy
+# that depends on ProxyFix resolving X-Forwarded-For, and getting the hop count
+# wrong fails in both directions: trust too few and every user shares one
+# budget, trust too many and a client can prepend an address and dodge the
+# limit. Asserted here because neither failure is visible from the outside, and
+# because the implicit default has been misread as absent more than once.
+proxy_fix = main.app.wsgi_app
+expect('exactly one forwarded-for hop is trusted',
+       getattr(proxy_fix, 'x_for', None), 1)
+
+probe = main.app.test_client()
+seen = probe.get('/__check_remote_addr',
+                 headers={'X-Forwarded-For': '203.0.113.45'},
+                 environ_overrides={'REMOTE_ADDR': '10.0.0.7'}).get_json()
+expect('the client address reaches the app, not the proxy',
+       (seen or {}).get('addr'), '203.0.113.45')
+
+spoofed = probe.get('/__check_remote_addr',
+                    headers={'X-Forwarded-For': '1.2.3.4, 203.0.113.45'},
+                    environ_overrides={'REMOTE_ADDR': '10.0.0.7'}).get_json()
+expect('a client cannot prepend an address to dodge its own budget',
+       (spoofed or {}).get('addr'), '203.0.113.45')
+
+without = probe.get('/__check_remote_addr',
+                    environ_overrides={'REMOTE_ADDR': '10.0.0.7'}).get_json()
+expect('and a request with no forwarded header falls back to the connection',
+       (without or {}).get('addr'), '10.0.0.7')
 
 os.unlink(_db.name)
 

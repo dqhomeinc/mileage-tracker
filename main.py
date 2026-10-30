@@ -24,7 +24,15 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 load_dotenv()
 
 app = Flask(__name__)
-app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
+# x_for=1 is werkzeug's own default, so this is not a behaviour change -- it is
+# written out because leaving it implicit has now been read three times as "the
+# client address is not resolved", which would make the per-IP login limit a
+# global one. Stating it also pins the value rather than inheriting a default a
+# future werkzeug could change, and records the trust decision: exactly one
+# proxy. Render appends the client address to X-Forwarded-For, so the last
+# entry is the genuine one; trusting more hops than exist would let a client
+# prepend its own and choose the address it appears to come from.
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 _database_url = os.environ.get('DATABASE_URL')
 
 # Deployed, as opposed to running from a local checkout or a check script.
