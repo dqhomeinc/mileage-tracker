@@ -2749,12 +2749,32 @@ document.getElementById('logTripBtn').addEventListener('click', async () => {
   };
 
   try {
-    const resp = await fetch('/log', {
+    const post = body => fetch('/log', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
+      body: JSON.stringify(body)
     });
-    const data = await resp.json();
+
+    let resp = await post(payload);
+    let data = await resp.json();
+
+    // The server found this trip already on record. Two outcomes, and the
+    // difference matters: an overlapping one cannot be confirmed through,
+    // because the same route over the same hours describes being in two places
+    // at once. An untimed one only looks suspicious, so it is asked about.
+    if (resp.status === 409 && data.duplicate) {
+      if (data.can_confirm === false) {
+        showError(`${data.error} ${describeDuplicate(data.existing, { inline: true })}`);
+        return;
+      }
+      if (!confirm(`${describeDuplicate(data.existing)}\n\nLog it again anyway?`)) {
+        showError('Trip not logged — it looks like you had already logged it.');
+        return;
+      }
+      resp = await post({ ...payload, confirm_duplicate: true });
+      data = await resp.json();
+    }
+
     if (!resp.ok) { showError(data.error || 'Failed to log trip.'); return; }
 
     // Only now does the trip have an id to attach anything to. A file that
@@ -3022,6 +3042,30 @@ function wireLoggingKeyInput(inputId) {
 
 wireLoggingKeyInput('tripLoggingKey');
 wireLoggingKeyInput('editLoggingKey');
+
+// What the confirm says about the trip already on record. Built from the
+// server's own copy rather than from the form, so it describes what is stored
+// and not what was typed -- if those differ, the stored one is the one worth
+// showing.
+function describeDuplicate(existing, { inline = false } = {}) {
+  if (!existing) return inline ? '' : 'You have already logged a trip like this.';
+  const when = existing.trip_date ? formatTripDate(existing.trip_date) : 'an earlier date';
+  const times = formatTimeRange(existing.start_time, existing.end_time,
+                                existing.trip_date, null);
+  const miles = existing.miles != null ? `${existing.miles} mi` : 'mileage pending';
+  // Inline for the error strip, which is one line; multi-line for the confirm
+  // dialog, where the trip is the thing being asked about and deserves room.
+  if (inline) {
+    return `Kept: ${when}${times ? ', ' + times : ''} · ${existing.start} → ${existing.end}.`;
+  }
+  return [
+    'You have already logged this trip:',
+    '',
+    `${when}${times ? ' · ' + times : ''}`,
+    `${existing.start} → ${existing.end}`,
+    miles,
+  ].join('\n');
+}
 
 function showError(msg) {
   const el = document.getElementById('errorAlert');

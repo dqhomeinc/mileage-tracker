@@ -62,9 +62,20 @@ alice = make_user('alice')
 bob = make_user('bob')
 
 
+# Every body gets a distinct start time. This check is about the key, not about
+# trips, and several of its cases log the same trip more than once to try the
+# key in different forms -- which duplicate detection now, correctly, refuses.
+# Varying the time keeps the two concerns independent, where sending
+# confirm_duplicate would quietly make this check depend on another feature's
+# flag to mean anything.
+_minute = iter(range(0, 1440))
+
+
 def trip_body(key, **extra):
+    minutes = next(_minute)
     body = {'start': 'Charlotte, NC', 'end': 'Concord, NC',
-            'distance_miles': 12.5, 'trip_date': '2026-10-02'}
+            'distance_miles': 12.5, 'trip_date': '2026-10-02',
+            'start_time': f'{minutes // 60:02d}:{minutes % 60:02d}'}
     if key is not None:
         body['logging_key'] = key
     body.update(extra)
