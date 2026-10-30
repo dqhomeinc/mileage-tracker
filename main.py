@@ -1358,7 +1358,8 @@ def _windows_overlap(a, b):
     return a[0] < b[1] and b[0] < a[1]
 
 
-def find_overlapping_trip(user_id, start, end, trip_date, window):
+def find_overlapping_trip(user_id, start, end, trip_date, window,
+                          exclude_trip_id=None):
     """A trip on the same route whose time overlaps `window`, or None.
 
     This is the case that cannot be explained away. Two visits to one client in
@@ -1376,6 +1377,10 @@ def find_overlapping_trip(user_id, start, end, trip_date, window):
     only which trip gets described back to the caller when more than one
     overlaps, and the earliest is the clearer answer to "you already logged
     this".
+
+    exclude_trip_id leaves one trip out of the comparison, for an edit: a trip
+    always overlaps itself, so without this every save would be refused by the
+    row it is saving.
     """
     if not (start and end and trip_date and window):
         return None
@@ -1384,11 +1389,12 @@ def find_overlapping_trip(user_id, start, end, trip_date, window):
         return None
     nearby = [(day + timedelta(days=offset)).isoformat() for offset in (-1, 0, 1)]
 
-    candidates = (Trip.query
-                  .filter_by(user_id=user_id, start_location=start, end_location=end)
-                  .filter(Trip.trip_date.in_(nearby))
-                  .order_by(Trip.id)
-                  .all())
+    query = (Trip.query
+             .filter_by(user_id=user_id, start_location=start, end_location=end)
+             .filter(Trip.trip_date.in_(nearby)))
+    if exclude_trip_id is not None:
+        query = query.filter(Trip.id != exclude_trip_id)
+    candidates = query.order_by(Trip.id).all()
     for candidate in candidates:
         other = _trip_window(candidate.trip_date, candidate.start_time,
                              candidate.end_time, _trip_end_date(candidate),
@@ -1637,6 +1643,27 @@ def update_trip(trip_id):
     date_error = validate_end_date(end_date, trip_date, start_time, end_time)
     if date_error:
         return jsonify({'error': date_error}), 400
+
+    # The same rule the log form enforces, for the same reason: a trip cannot be
+    # driven twice over the same hours, and that is as true of an edit as of a
+    # new entry. Without it the refusal on logging is only a speed bump -- a
+    # trip could be logged at a free time and then edited to the overlapping
+    # one it was refused at.
+    #
+    # Checked against every trip except this one. A trip always overlaps itself,
+    # so leaving it in would refuse every save by the row being saved.
+    window = _trip_window(trip_date, start_time, end_time, end_date,
+                          data.get('duration_seconds') or trip.duration_seconds)
+    clash = find_overlapping_trip(current_user.id, start, end, trip_date, window,
+                                  exclude_trip_id=trip.id)
+    if clash:
+        return jsonify({
+            'duplicate': True,
+            'can_confirm': False,
+            'error': 'Another trip on this route already covers those hours, '
+                     'so this edit was not saved.',
+            'existing': _duplicate_summary(clash),
+        }), 409
 
     distance_miles = float(distance_miles) if distance_miles is not None else None
 

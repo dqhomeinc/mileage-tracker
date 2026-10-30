@@ -3315,6 +3315,13 @@ async function saveEdit() {
       body: JSON.stringify(payload)
     });
     const data = await resp.json();
+    // A 409 names the trip this edit collided with, which is more use than
+    // the message alone: the modal is still open on the times that were
+    // refused, so the answer to "why" is which other trip already has them.
+    if (resp.status === 409 && data.duplicate) {
+      alert(`${data.error}\n\n${describeDuplicate(data.existing)}`);
+      return;
+    }
     if (!resp.ok) { alert(data.error || 'Failed to save.'); return; }
 
     // Full re-render rather than patching the row in place: the trip's date
