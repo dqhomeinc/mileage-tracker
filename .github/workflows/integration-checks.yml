@@ -140,6 +140,21 @@ jobs:
       - name: Check the Postgres driver fits its SCRAM dependency
         run: python .github/scripts/check_db_driver.py
 
+  # Every build log said "Using Python version 3.14.3 (default)" while these
+  # jobs tested on 3.11, so the same requirements.txt resolved under a
+  # different interpreter in production than in CI. That is the general case of
+  # the scramp break: a dependency problem can reach production having passed
+  # every check here, because the environments were never the same.
+  python-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Check production and CI pin the same Python
+        run: python .github/scripts/check_python_version.py
+
   # CI has no DATABASE_URL, so a plain `import app` always falls back to
   # SQLite and never exercises the pg8000 connection or the Postgres branch
   # of _migrate_db() — both of which production actually depends on.
