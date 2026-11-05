@@ -1,4 +1,5 @@
 import base64
+import time
 import hmac
 import json
 import os
@@ -94,10 +95,30 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 # leaves stale connections sitting in the pool. pool_pre_ping catches those
 # with a cheap check before use instead of failing mid-query; pool_recycle
 # avoids handing out connections idle long enough to be suspect anyway.
+# Neon's free tier suspends the compute when idle, and waking it takes a few
+# seconds. Without a timeout a connect that never answers blocks for ever --
+# and because the schema is prepared at import, that blocks the import, so
+# gunicorn never binds a port and the platform reports "no open ports detected"
+# with nothing at all to diagnose. A timeout turns that into a named error in
+# seconds.
+DB_CONNECT_TIMEOUT = 10
+
+# How many times to try preparing the schema at startup. Waking a suspended
+# compute is the expected reason for the first attempt to fail, so a couple of
+# retries covers it; past that the database is genuinely unreachable and the
+# right outcome is a failed deploy that says so.
+DB_STARTUP_ATTEMPTS = 3
+
 app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
     'pool_pre_ping': True,
     'pool_recycle': 280,
 }
+# Only for a real server. SQLite accepts a `timeout` too, but it means how long
+# to wait for a file lock, which is a different thing entirely.
+if not _db_url.startswith('sqlite'):
+    app.config['SQLALCHEMY_ENGINE_OPTIONS']['connect_args'] = {
+        'timeout': DB_CONNECT_TIMEOUT,
+    }
 
 # Brevo (HTTPS email API) — Railway blocks outbound SMTP on non-Pro plans,
 # so password reset emails are sent over HTTPS instead of raw SMTP.
@@ -2236,9 +2257,39 @@ def change_password():
 # Entry point
 # ---------------------------------------------------------------------------
 
-with app.app_context():
-    db.create_all()
-    _migrate_db()
+def _prepare_database():
+    """Create any new tables and run the column migrations, with retries.
+
+    Retried because the first connect after an idle period is waking a
+    suspended compute, and that is an expected slow path rather than a fault.
+    Raised after the last attempt because a half-prepared schema is worse than
+    a failed deploy: the app would start and then fail on whichever query
+    needed the missing column.
+    """
+    last_error = None
+    for attempt in range(1, DB_STARTUP_ATTEMPTS + 1):
+        try:
+            with app.app_context():
+                db.create_all()
+                _migrate_db()
+            return
+        except Exception as exc:  # noqa: BLE001 — retried, then re-raised below
+            last_error = exc
+            app.logger.warning(
+                'Could not prepare the database (attempt %s of %s): %s',
+                attempt, DB_STARTUP_ATTEMPTS, exc)
+            if attempt < DB_STARTUP_ATTEMPTS:
+                time.sleep(2 * attempt)
+
+    raise RuntimeError(
+        f'Could not reach the database after {DB_STARTUP_ATTEMPTS} attempts: '
+        f'{last_error}. The app refuses to start rather than serve requests '
+        'against a schema it could not prepare. Check the database is awake '
+        'and DATABASE_URL is correct.'
+    ) from last_error
+
+
+_prepare_database()
 
 if __name__ == '__main__':
     app.run(debug=True)
