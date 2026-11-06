@@ -232,12 +232,22 @@ with patch.object(main, 'calculate_driving_miles', side_effect=RuntimeError('no 
 
 # An id that is not an id must drop the attribution, not return a 500.
 for bad, label in (('abc', 'a non-numeric vehicle_id'), ('1.5', 'a fractional id'),
-                   ([1], 'a list as an id'), (True, 'a boolean as an id')):
+                   ([1], 'a list as an id'), (True, 'a boolean as an id'),
+                   ('\u00b2', 'a superscript digit'), ('\u0661\u0662', 'non-ASCII digits'),
+                   ('9' * 5000, 'a 5000-digit string'), (2 ** 70, 'an int past 64 bits'),
+                   ('9' * 25, 'a 25-digit string'), (-(2 ** 70), 'a hugely negative int')):
     resp = anon.post('/api/v1/trips', headers=auth(JANE_KEY),
                      json={**BODY, 'vehicle_id': bad})
     expect(f'{label} does not crash the request', resp.status_code, 201)
     expect(f'{label} attaches no vehicle', field(resp, 'vehicle'), None)
 
+for bad_id in ('\u00b2', '9' * 5000, 2 ** 70):
+    r = anon.post('/api/v1/trips', headers=auth(JANE_KEY), json={**BODY, 'business_id': bad_id})
+    expect(f'a junk business_id {str(bad_id)[:8]!r} does not crash', r.status_code, 201)
+# Plain ids, including padded ones, still resolve.
+expect('an ordinary id still resolves', (main._as_id(7), main._as_id(' 7 '), main._as_id('-3')), (7, 7, -3))
+expect('the largest valid id still resolves', main._as_id(2 ** 63 - 1), 2 ** 63 - 1)
+expect('one past it does not', main._as_id(2 ** 63), None)
 resp = anon.post('/api/v1/trips', headers=auth(JANE_KEY),
                  json={**BODY, 'business_id': 'abc'})
 expect('a non-numeric business_id does not crash either', resp.status_code, 201)
