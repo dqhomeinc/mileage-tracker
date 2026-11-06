@@ -301,8 +301,8 @@
       An API key lets a script or an assistant act for you
       <strong>without your password</strong>. You choose what each key may do
       when you create it, and that can't be changed afterwards — to change a
-      key's permissions, revoke it and create a new one. No key can read, edit
-      or delete trips, reach your account details, or sign in to this site.
+      key's permissions, revoke it and create a new one. No key can reach your
+      account details, change your password, or sign in to this site.
       Revoke one any time; nothing else about your account changes.
     </p>
 
@@ -329,10 +329,14 @@
     </div>
     <div class="field">
       <label>Permissions</label>
+      <div class="key-note" style="margin-bottom:8px">
+        Start with the least a key needs. Reading history, editing and deleting
+        trips are off by default; deleting can't be undone.
+      </div>
       <div class="scope-picker" id="scopePicker">
         {% for name, label in api_scopes.items() %}
         <label class="scope-option">
-          <input type="checkbox" name="apiScope" value="{{ name }}" checked>
+          <input type="checkbox" name="apiScope" value="{{ name }}"{% if name in api_default_scopes %} checked{% endif %}>
           <span><strong>{{ label }}</strong><code>{{ name }}</code></span>
         </label>
         {% endfor %}
@@ -688,6 +692,22 @@ function setupBlock(fullKey, scopes) {
       '  "vehicle_id":     1 }',
       '');
   }
+  if (can('trips:read')) {
+    lines.push(
+      'GET /api/v1/trips?limit=50&offset=0   - your trips, newest first',
+      'GET /api/v1/trips/<id>               - one trip',
+      '');
+  }
+  if (can('trips:update')) {
+    lines.push(
+      'PATCH /api/v1/trips/<id>   - send only the fields to change, same names as above',
+      '  (started_at and ended_at together; changing a location or stops re-measures',
+      '   the mileage; an edit that overlaps another trip on the route returns 409)',
+      '');
+  }
+  if (can('trips:delete')) {
+    lines.push('DELETE /api/v1/trips/<id>  - permanent, no undo', '');
+  }
   if (can('vehicles:read'))   lines.push('GET /api/v1/vehicles    - vehicle ids for vehicle_id');
   if (can('businesses:read')) lines.push('GET /api/v1/businesses  - business ids for business_id');
   lines.push('',
@@ -703,8 +723,8 @@ function setupBlock(fullKey, scopes) {
       '- The server sleeps when idle, so the first call after a quiet period',
       '  can take about 60s. Allow a 90s timeout and do not retry on timeout:',
       '  the request has usually landed, and retrying logs the trip twice.',
-      '- 201 created, 401 bad key, 403 missing permission, 422 bad payload',
-      '  (the message names the field).');
+      '- 201 created, 401 bad key, 403 missing permission, 409 overlaps a trip',
+      '  already logged, 422 bad payload (the message names the field).');
   }
   return lines.join('\n');
 }

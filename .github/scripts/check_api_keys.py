@@ -172,7 +172,7 @@ for path in ('/', '/history', '/profile', '/my-vehicles'):
 
 # There is no API route that writes reference data or touches trips.
 for method, path in (('POST', '/api/v1/vehicles'), ('DELETE', '/api/v1/vehicles'),
-                     ('POST', '/api/v1/businesses'), ('GET', '/api/v1/trips'),
+                     ('POST', '/api/v1/businesses'), ('PATCH', '/api/v1/trips'),
                      ('DELETE', '/api/v1/trips')):
     code = anon.open(path, method=method, headers=auth(JANE_KEY)).status_code
     expect(f'{method} {path} is not a route', code, 405)
@@ -456,10 +456,34 @@ def scoped_key(*scopes):
     return field(resp, 'key')
 
 
+_made = [0]
+
+
+def make_trip(user_id=None, **over):
+    """A trip row inserted directly, on a day of its own, and its id."""
+    from datetime import date, timedelta
+    _made[0] += 1
+    day = date(2025, 1, 1) + timedelta(days=_made[0])
+    fields = dict(user_id=user_id or JANE_ID, start_location='M1', end_location='M2',
+                  trip_date=str(day), start_time='08:00', end_time='09:00',
+                  end_date=str(day), distance_miles=5.0, duration_seconds=1800,
+                  created_via='web')
+    fields.update(over)
+    with main.app.app_context():
+        t = main.Trip(**fields)
+        main.db.session.add(t)
+        main.db.session.commit()
+        return t.id
+
+
 ROUTES = {
     'trips:create':    lambda c, k: c.post('/api/v1/trips', headers=auth(k),
                                            json=body({'started_at': '2026-11-01T08:00',
                                                  'ended_at': '2026-11-01T08:30'})),
+    'trips:read':      lambda c, k: c.get('/api/v1/trips', headers=auth(k)),
+    'trips:update':    lambda c, k: c.patch(f'/api/v1/trips/{make_trip()}', headers=auth(k),
+                                            json={'notes': 'edited'}),
+    'trips:delete':    lambda c, k: c.delete(f'/api/v1/trips/{make_trip()}', headers=auth(k)),
     'vehicles:read':   lambda c, k: c.get('/api/v1/vehicles', headers=auth(k)),
     'businesses:read': lambda c, k: c.get('/api/v1/businesses', headers=auth(k)),
 }
@@ -511,7 +535,7 @@ for label, body in (('no scopes field', {}),
                     ('an empty list', {'scopes': []}),
                     ('a string instead of a list', {'scopes': 'trips:create'}),
                     ('a non-string entry', {'scopes': [1]}),
-                    ('an unknown scope', {'scopes': ['trips:create', 'trips:delete']}),
+                    ('an unknown scope', {'scopes': ['trips:create', 'trips:purge']}),
                     ('only unknown scopes', {'scopes': ['admin']})):
     resp = jane_client.post('/profile/api-keys',
                             json={'name': 'x', 'password': PASSWORD, **body})
@@ -542,7 +566,7 @@ expect('unrecognised names are dropped', main.parse_scopes('trips:create,root'),
 
 # The decorator refuses to be applied without a real scope, so a route cannot
 # be added that is open to every key by accident.
-for bad in ('trips:delete', None):
+for bad in ('trips:purge', None):
     try:
         main.api_key_required(bad)
         expect(f'api_key_required({bad!r}) is rejected', 'accepted', 'rejected')
@@ -599,6 +623,188 @@ with patch.object(main, 'calculate_driving_miles',
                   side_effect=lambda *a, **k: calls.append(1) or MEASURED):
     anon.post('/api/v1/trips', headers=auth(dkey), json=DUP)
 expect('a refused duplicate makes no distance lookup', calls, [])
+
+# ── Reading trips ───────────────────────────────────────────────────────
+tk = scoped_key('trips:read', 'trips:update', 'trips:delete')
+bob_trip = make_trip(user_id=BOB_ID, notes='bobs secret')
+with main.app.app_context():
+    jane_total = main.Trip.query.filter_by(user_id=JANE_ID).count()
+
+listing = anon.get('/api/v1/trips', headers=auth(tk)).get_json()
+expect('the list reports the owner\'s total', listing['total'], jane_total)
+expect('and returns the default page', len(listing['trips']), min(50, jane_total))
+expect('the list never includes another account\'s trips',
+       bob_trip in [t['id'] for t in listing['trips']], False)
+expect('nor their notes', 'bobs secret' in str(listing), False)
+# By date, then most recently logged -- the order the history page uses.
+dates = [(t['started_at'] or '')[:10] for t in listing['trips']]
+expect('newest first', dates, sorted(dates, reverse=True))
+sample = listing['trips'][0]
+expect('a trip carries the API\'s own field names',
+       {'id', 'start_location', 'end_location', 'started_at', 'ended_at', 'miles',
+        'notes', 'stops', 'vehicle_id', 'business_id', 'logged_via'} <= set(sample), True)
+expect('and no attachments or place ids',
+       {'attachments', 'start_place_id', 'end_place_id'} & set(sample), set())
+one = anon.get(f'/api/v1/trips/{TRIP_ID}', headers=auth(tk)).get_json()
+expect('one trip reads back with ISO times', (one['started_at'], one['ended_at']),
+       ('2026-10-08T08:29', '2026-10-08T09:10'))
+expect('and says it was logged by the API', one['logged_via'], 'api')
+expect('another account\'s trip is a 404, like one that does not exist',
+       (anon.get(f'/api/v1/trips/{bob_trip}', headers=auth(tk)).status_code,
+        anon.get('/api/v1/trips/999999', headers=auth(tk)).status_code), (404, 404))
+
+page = anon.get('/api/v1/trips?limit=2&offset=1', headers=auth(tk)).get_json()
+expect('paging honours limit', len(page['trips']), 2)
+expect('and offset', [t['id'] for t in page['trips']],
+       [t['id'] for t in listing['trips'][1:3]])
+for q in ('limit=0', 'limit=201', 'limit=abc', 'offset=-1', 'limit=1.5'):
+    expect(f'?{q} is refused', anon.get(f'/api/v1/trips?{q}', headers=auth(tk)).status_code, 422)
+
+# ── Editing trips ───────────────────────────────────────────────────────
+def edit(trip_id, body, key=None):
+    return anon.patch(f'/api/v1/trips/{trip_id}', headers=auth(key or tk), json=body)
+
+t1 = make_trip(start_location='E1', end_location='E2', trip_date='2026-08-01',
+               start_time='09:00', end_time='10:00', end_date='2026-08-01', notes='orig')
+t2 = make_trip(start_location='E1', end_location='E2', trip_date='2026-08-01',
+               start_time='11:00', end_time='12:00', end_date='2026-08-01')
+calls = []
+with patch.object(main, 'calculate_driving_miles',
+               side_effect=lambda *a, **k: calls.append(a) or (7.7, 900, None)):
+    r = edit(t1, {'notes': 'changed'})
+    expect('a notes-only edit succeeds', (r.status_code, field(r, 'notes')), (200, 'changed'))
+    expect('and leaves everything else', (field(r, 'start_location'), field(r, 'miles')), ('E1', 5.0))
+    expect('and does not re-measure', calls, [])
+    expect('a null note clears it', field(edit(t1, {'notes': None}), 'notes'), None)
+
+    r = edit(t1, {'end_location': 'E9'})
+    expect('changing a location re-measures server-side',
+           (r.status_code, field(r, 'miles'), field(r, 'duration_seconds')), (200, 7.7, 900))
+    expect('with one measurement', len(calls), 1)
+    r = edit(t1, {'end_location': 'E2', 'miles': 999})
+    expect('a supplied mileage never overrides a measurement', field(r, 'miles'), 7.7)
+    r = edit(t1, {'notes': 'x', 'miles': 999})
+    expect('and is ignored when the route did not change', field(r, 'miles'), 7.7)
+
+with patch.object(main, 'calculate_driving_miles', side_effect=RuntimeError('no route')):
+    r = edit(t1, {'end_location': 'E8'})
+    expect('an unmeasurable new route leaves no stale mileage', field(r, 'miles'), None)
+    r = edit(t1, {'end_location': 'E7', 'miles': 12.5})
+    expect('the supplied mileage is only the fallback', field(r, 'miles'), 12.5)
+    expect('a bad fallback is refused', edit(t1, {'end_location': 'E6', 'miles': -1}).status_code, 422)
+
+# Times move together, and obey the same validators as logging.
+expect('started_at without ended_at is refused',
+       edit(t1, {'started_at': '2026-08-01T09:00'}).status_code, 422)
+expect('ended_at without started_at is refused',
+       edit(t1, {'ended_at': '2026-08-01T10:00'}).status_code, 422)
+expect('an offset-aware time is refused',
+       edit(t1, {'started_at': '2026-08-01T09:00+00:00', 'ended_at': None}).status_code, 422)
+expect('an end before the start is refused',
+       edit(t1, {'started_at': '2026-08-01T09:00', 'ended_at': '2026-08-01T08:00'}).status_code, 422)
+moved = edit(t1, {'started_at': '2026-08-02T09:00', 'ended_at': '2026-08-02T10:15'})
+expect('times move together', (moved.status_code, field(moved, 'started_at'), field(moved, 'ended_at')),
+       (200, '2026-08-02T09:00', '2026-08-02T10:15'))
+cleared = edit(t1, {'started_at': '2026-08-02T09:00', 'ended_at': None})
+expect('ended_at may be cleared', field(cleared, 'ended_at'), None)
+
+# The overlap rule, and that a trip never collides with itself.
+with patch.object(main, 'calculate_driving_miles', return_value=(5.0, 900, None)):
+    edit(t1, {'end_location': 'E2', 'started_at': '2026-08-01T09:00', 'ended_at': '2026-08-01T10:00'})
+    own = edit(t1, {'started_at': '2026-08-01T09:15', 'ended_at': '2026-08-01T09:45'})
+    expect('moving a trip within its own hours is allowed', own.status_code, 200)
+    into = edit(t1, {'started_at': '2026-08-01T11:30', 'ended_at': '2026-08-01T11:45'})
+    expect('moving into another trip\'s hours is refused', into.status_code, 409)
+    expect('and cannot be confirmed through', field(into, 'can_confirm'), False)
+    expect('and names the trip in the way', field(into, 'existing', {}).get('id'), t2)
+    kept = anon.get(f'/api/v1/trips/{t1}', headers=auth(tk)).get_json()
+    expect('a refused edit changes nothing', kept['started_at'], '2026-08-01T09:15')
+    adj = edit(t1, {'started_at': '2026-08-01T10:00', 'ended_at': '2026-08-01T10:30'})
+    expect('moving to an adjacent free slot is allowed', adj.status_code, 200)
+    # The overlap rule is only applied when the route or hours move.
+    # Inserted straight into the table, as one logged before the overlap rule
+    # existed would be: it overlaps t2 (11:00-12:00) and always has.
+    t3 = make_trip(start_location='E1', end_location='E2', trip_date='2026-08-01',
+                   start_time='11:30', end_time='11:45', end_date='2026-08-01')
+    with main.app.app_context():
+        row = main.db.session.get(main.Trip, t3)
+        clash = main.find_overlapping_trip(
+            JANE_ID, 'E1', 'E2', '2026-08-01',
+            main._trip_window('2026-08-01', '11:30', '11:45', '2026-08-01', None),
+            exclude_trip_id=t3)
+        expect('(t3 overlaps t2)', clash.id if clash else None, t2)
+    expect('a notes-only edit is not refused for a pre-existing overlap',
+           edit(t3, {'notes': 'ok'}).status_code, 200)
+
+# Vehicles and businesses on an edit.
+other_vehicle = main.app.test_client()
+with main.app.app_context():
+    bobs_v = main.Vehicle.query.filter_by(user_id=BOB_ID).first().id
+r = edit(t2, {'vehicle_id': JANE_VEHICLE})
+expect('a vehicle can be attached', (r.status_code, field(r, 'vehicle_id')), (200, JANE_VEHICLE))
+expect('a mistyped vehicle id is refused, not silently cleared',
+       edit(t2, {'vehicle_id': 987654}).status_code, 422)
+expect('another account\'s vehicle is refused', edit(t2, {'vehicle_id': bobs_v}).status_code, 422)
+expect('and the vehicle was kept',
+       anon.get(f'/api/v1/trips/{t2}', headers=auth(tk)).get_json()['vehicle_id'], JANE_VEHICLE)
+expect('null clears the vehicle', field(edit(t2, {'vehicle_id': None}), 'vehicle_id'), None)
+expect('a bad business id is refused', edit(t2, {'business_id': 987654}).status_code, 422)
+
+# Malformed edits.
+for label, body in (('an empty object', {}), ('an unknown field', {'color': 'red'}),
+                    ('the old names', {'start': 'x'}), ('a non-string note', {'notes': 5}),
+                    ('a non-string location', {'start_location': 5}),
+                    ('a blank location', {'start_location': '  '}),
+                    ('too many stops', {'stops': ['s'] * 11})):
+    expect(f'an edit with {label} is refused', edit(t2, body).status_code, 422)
+expect('a list body is refused', anon.patch(f'/api/v1/trips/{t2}', headers=auth(tk),
+                                            json=[1]).status_code, 422)
+expect('another account\'s trip cannot be edited', edit(bob_trip, {'notes': 'pwned'}).status_code, 404)
+with main.app.app_context():
+    expect('and was not', main.db.session.get(main.Trip, bob_trip).notes, 'bobs secret')
+
+# ── Deleting trips ──────────────────────────────────────────────────────
+doomed = make_trip()
+with main.app.app_context():
+    main.db.session.add(main.TripAttachment(trip_id=doomed, filename='r.png',
+                                            mimetype='image/png', byte_size=3, data=b'abc'))
+    main.db.session.commit()
+gone = anon.delete(f'/api/v1/trips/{doomed}', headers=auth(tk))
+expect('a trip is deleted', (gone.status_code, field(gone, 'deleted')), (200, doomed))
+with main.app.app_context():
+    expect('the trip is gone', main.db.session.get(main.Trip, doomed), None)
+    expect('and so are its attachments',
+           main.TripAttachment.query.filter_by(trip_id=doomed).count(), 0)
+expect('deleting it again is a 404',
+       anon.delete(f'/api/v1/trips/{doomed}', headers=auth(tk)).status_code, 404)
+expect('another account\'s trip cannot be deleted',
+       anon.delete(f'/api/v1/trips/{bob_trip}', headers=auth(tk)).status_code, 404)
+with main.app.app_context():
+    expect('and survives', main.db.session.get(main.Trip, bob_trip) is not None, True)
+
+# Holding one of the three does not grant the others.
+only_read = scoped_key('trips:read')
+victim = make_trip()
+expect('a read-only key cannot edit', edit(victim, {'notes': 'x'}, key=only_read).status_code, 403)
+expect('or delete',
+       anon.delete(f'/api/v1/trips/{victim}', headers=auth(only_read)).status_code, 403)
+with main.app.app_context():
+    expect('and the trip is untouched', main.db.session.get(main.Trip, victim).notes, None)
+only_delete = scoped_key('trips:delete')
+expect('a delete-only key cannot read', 
+       anon.get(f'/api/v1/trips/{victim}', headers=auth(only_delete)).status_code, 403)
+
+# Old keys keep exactly what they had, and nothing newer.
+expect('the new scopes are opt-in at creation',
+       set(main.API_DEFAULT_SCOPES) & {'trips:read', 'trips:update', 'trips:delete'}, set())
+expect('and legacy keys are backfilled with only the original three',
+       set(main.API_LEGACY_SCOPES), {'trips:create', 'vehicles:read', 'businesses:read'})
+page = jane_client.get('/profile').get_data(as_text=True)
+for name in ('trips:read', 'trips:update', 'trips:delete'):
+    tag = [l for l in page.splitlines() if f'value="{name}"' in l][0]
+    expect(f'{name} is not pre-ticked in the form', 'checked' in tag, False)
+expect('trips:create is pre-ticked',
+       'checked' in [l for l in page.splitlines() if 'value="trips:create"' in l][0], True)
 
 measure_patch.stop()
 os.unlink(_db.name)

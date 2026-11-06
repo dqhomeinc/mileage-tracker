@@ -23,6 +23,7 @@ TEMPLATES_WITH_CONTEXT = {
     # differently and the dict shape is what |tojson has to serialise.
     'profile.html': {'username': 'tester', 'email': 't@example.com', 'photo_data': None,
                      'api_base_url': 'https://example.test',
+                     'api_default_scopes': ['trips:create'],
                      'api_scopes': {'trips:create': 'Log trips',
                                     'vehicles:read': 'Read your vehicles'},
                      'api_keys': [
