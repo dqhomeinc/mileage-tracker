@@ -172,6 +172,23 @@ jobs:
       - name: Check the trip API keys
         run: python .github/scripts/check_api_keys.py
 
+  # A key is handed to something that is not a browser, so it can send anything.
+  # This sends it everything: hostile values to every /api/v1 and key route
+  # (found from the URL map, so new routes are covered), then inspects what was
+  # stored. SQLite accepts input Postgres refuses, so status codes alone would
+  # pass on exactly the inputs that fail in production.
+  api-robustness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Check no API input crashes the app or is stored unsafely
+        run: python .github/scripts/check_api_robustness.py
+
   # CI has no DATABASE_URL, so a plain `import app` always falls back to
   # SQLite and never exercises the pg8000 connection or the Postgres branch
   # of _migrate_db() — both of which production actually depends on.
