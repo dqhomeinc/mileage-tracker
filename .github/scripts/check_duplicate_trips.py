@@ -20,9 +20,17 @@ them true. Only the untimed case is asked about, since without times there is
 nothing to overlap and two untimed trips between the same places on one day
 could be real.
 
+The same rule applies to editing a trip, for the same reason -- the constraint
+is about what the data can mean, not about which route produced it. Without it
+the refusal on logging is only a speed bump: a trip could be logged at a free
+time and then edited to the overlapping one it was refused at. An edit is
+checked against every trip but itself, since a trip always overlaps itself and
+leaving it in would refuse every save by the row being saved.
+
 So the properties worth pinning down are: the reported case is caught and
-cannot be forced through, genuine pairs are untouched, and the ambiguous case is
-asked rather than refused.
+cannot be forced through, genuine pairs are untouched, the ambiguous case is
+asked rather than refused, and an edit is held to the same rule without
+tripping over itself.
 
 Run as a script so it fits the other checks in this directory; no test runner.
 """
@@ -279,6 +287,90 @@ with main.app.app_context():
     instant = main._trip_window('2026-10-08', '08:00', None, None, None)
     expect('and with neither the trip is an instant', instant[0], instant[1])
 
+# ── Editing into an overlap ────────────────────────────────────────────
+# The constraint is about the data, not the endpoint, so the edit route has to
+# enforce it too -- otherwise the refusal on logging is sidestepped by logging
+# at a free time and editing afterwards.
+count = trip_count()
+morning = log(jane, jane_key, trip_date='2026-10-18', start_time='08:00', end_time='08:41')
+afternoon = log(jane, jane_key, trip_date='2026-10-18', start_time='14:00', end_time='14:41')
+expect('two trips at different times of one day both log',
+       (morning.status_code, afternoon.status_code), (200, 200))
+
+with main.app.app_context():
+    jane_id = main.User.query.filter_by(email='jane@example.com').first().id
+    rows = (main.Trip.query
+            .filter_by(user_id=jane_id, trip_date='2026-10-18')
+            .order_by(main.Trip.id).all())
+    MORNING_ID, AFTERNOON_ID = rows[0].id, rows[1].id
+
+
+def edit(trip_id, **overrides):
+    body = trip(jane_key, trip_date='2026-10-18', **overrides)
+    body.setdefault('distance_miles', MEASURED[0])
+    body.setdefault('duration_seconds', MEASURED[1])
+    return jane.patch(f'/history/{trip_id}', json=body)
+
+
+moved = edit(AFTERNOON_ID, start_time='08:10', end_time='08:51')
+expect('editing the afternoon trip onto the morning one is refused',
+       moved.status_code, 409)
+expect('and marked as a duplicate', field(moved, 'duplicate'), True)
+expect('with no way to confirm it through', field(moved, 'can_confirm'), False)
+expect('and the trip it collided with is named',
+       (field(moved, 'existing') or {}).get('start_time'), '08:00')
+
+with main.app.app_context():
+    unchanged = main.db.session.get(main.Trip, AFTERNOON_ID)
+    expect('the edit was not applied', unchanged.start_time, '14:00')
+
+# ── Self-exclusion ───────────────────────────────────────────────────
+# Every ordinary edit depends on this: a trip always overlaps itself, so
+# leaving it in the comparison would refuse every save by the row being saved.
+# These are the cases that break first if the exclusion is wrong, and they are
+# the common path rather than an edge.
+expect('saving a trip unchanged is allowed',
+       edit(AFTERNOON_ID, start_time='14:00', end_time='14:41').status_code, 200)
+expect('editing only its notes is allowed',
+       edit(AFTERNOON_ID, start_time='14:00', end_time='14:41',
+            notes='client visit').status_code, 200)
+expect('nudging its time so the new window overlaps its old one is allowed',
+       edit(AFTERNOON_ID, start_time='14:05', end_time='14:46').status_code, 200)
+expect('and so is editing the other trip unchanged',
+       edit(MORNING_ID, start_time='08:00', end_time='08:41').status_code, 200)
+
+# The exclusion must be by id, not by content: a trip whose values now match
+# another trip's must still be refused.
+expect('moving it to a genuinely free time is allowed',
+       edit(AFTERNOON_ID, start_time='17:00', end_time='17:41').status_code, 200)
+expect('but moving it back onto the morning trip is still refused',
+       edit(AFTERNOON_ID, start_time='08:20', end_time='09:01').status_code, 409)
+
+# ── Edits that only resemble an overlap ────────────────────────────
+expect('editing to back-to-back with the morning trip is allowed',
+       edit(AFTERNOON_ID, start_time='08:41', end_time='09:22').status_code, 200)
+expect('and editing to the reversed route over the same hours is allowed',
+       edit(AFTERNOON_ID, start='Clinton Street, Newton', end='Lexington, MA',
+            start_time='08:10', end_time='08:51').status_code, 200)
+
+# ── One user's trip cannot block another's edit ──────────────────
+bob_trip = log(bob, bob_key, trip_date='2026-10-18', start_time='08:00', end_time='08:41')
+expect("another account's identical trip logs", bob_trip.status_code, 200)
+with main.app.app_context():
+    bob_id = main.User.query.filter_by(email='bob@example.com').first().id
+    bob_row = (main.Trip.query.filter_by(user_id=bob_id, trip_date='2026-10-18')
+               .order_by(main.Trip.id).first())
+    BOB_TRIP_ID = bob_row.id
+expect("and bob can edit it onto the same hours jane uses",
+       bob.patch(f'/history/{BOB_TRIP_ID}',
+                 json=trip(bob_key, trip_date='2026-10-18', start_time='08:10',
+                           end_time='08:51', distance_miles=MEASURED[0],
+                           duration_seconds=MEASURED[1])).status_code, 200)
+expect("while one user still cannot reach another's trip at all",
+       bob.patch(f'/history/{MORNING_ID}',
+                 json=trip(bob_key, trip_date='2026-10-18',
+                           start_time='09:00')).status_code, 404)
+
 measure.stop()
 os.unlink(_db.name)
 
@@ -288,5 +380,6 @@ if failures:
         print(f'  - {f}')
     sys.exit(1)
 
-print('Duplicate trip check OK — an overlapping re-entry is refused and the '
-      'first kept, genuine pairs pass, and the untimed case is asked.')
+print('Duplicate trip check OK — an overlapping entry or edit is refused and '
+      'the first kept, an edit never collides with itself, and genuine pairs '
+      'pass.')
