@@ -142,6 +142,7 @@
 <body>
 
 {% include '_navbar.html' %}
+{% include '_confirm_dialog.html' %}
 
 <div class="page">
 
@@ -307,7 +308,7 @@ async function saveBusiness() {
 }
 
 async function deleteBusiness(id) {
-  if (!confirm('Remove this business? Trips using it will have the business cleared.')) return;
+  if (!await confirmDialog({ title: 'Remove business?', message: 'Trips using it will have the business cleared.', confirmLabel: 'Remove' })) return;
   try {
     const resp = await fetch(`/businesses/${id}`, { method: 'DELETE' });
     if (!resp.ok) return;
