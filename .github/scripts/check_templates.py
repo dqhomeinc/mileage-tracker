@@ -3,7 +3,9 @@ Jinja errors (undefined vars, bad syntax, broken includes) that a plain
 `import app` never exercises, since render_template() only runs at
 request time, not import time.
 """
+import re
 import sys
+from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader
 
@@ -28,6 +30,19 @@ for name, context in TEMPLATES_WITH_CONTEXT.items():
             # and catching only Jinja's own errors let that abort the script
             # with a traceback, taking every template after it unchecked.
             failures.append(f'{name} (photo_data={photo!r}): {type(e).__name__}: {e}')
+
+# Every confirmation goes through confirmDialog(), not the browser's confirm().
+# A native dialog is the odd one out visually, and where the host suppresses
+# dialogs (embedded and PWA webviews, "prevent this page from creating
+# dialogs") it returns false without showing anything, so the action silently
+# does nothing. Scanned in the template source rather than the render, since a
+# call inside a handler is never executed by rendering.
+NATIVE_CONFIRM = re.compile(r'(?<![\w.$])confirm\s*\(')
+for path in sorted(Path('templates').glob('*.html')):
+    for number, line in enumerate(path.read_text().splitlines(), 1):
+        if NATIVE_CONFIRM.search(line):
+            failures.append(f'{path.name}:{number}: native confirm() — use '
+                            f'confirmDialog() so it renders and cannot be suppressed.')
 
 if failures:
     print('Template render check FAILED:')
