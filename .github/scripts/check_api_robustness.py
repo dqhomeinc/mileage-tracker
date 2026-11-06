@@ -100,7 +100,7 @@ HOSTILE = [
 RAW_BODIES = [
     b'', b'null', b'[]', b'"text"', b'5', b'true', b'{', b'{"a":', b'\xff\xfe',
     b'{"miles": NaN}', b'{"miles": Infinity}', b'{"miles": 1e999}',
-    b'[' * 5000 + b']' * 5000,
+    b'[' * 5000 + b']' * 5000, b'[' * 30000 + b']' * 30000, b'{"a":' * 12000 + b'1' + b'}' * 12000,
 ]
 FIELDS = ['start_location', 'end_location', 'started_at', 'ended_at', 'notes',
           'vehicle_id', 'business_id', 'stops', 'miles', 'name', 'year', 'make',

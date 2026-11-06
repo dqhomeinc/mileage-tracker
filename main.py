@@ -13,6 +13,7 @@ import requests
 from dotenv import load_dotenv
 from itsdangerous import URLSafeTimedSerializer, SignatureExpired, BadSignature
 from werkzeug.routing import BaseConverter
+from flask.json.provider import DefaultJSONProvider
 from flask import (Flask, render_template, request, redirect, url_for, jsonify, flash,
                    session, Response, g)
 from flask_sqlalchemy import SQLAlchemy
@@ -46,6 +47,27 @@ class _IdConverter(BaseConverter):
 
 
 app.url_map.converters['id'] = _IdConverter
+
+
+class _SafeJSONProvider(DefaultJSONProvider):
+    """Reads a request body without letting its shape crash the parser.
+
+    A body of a few thousand nested brackets fits well inside any size limit and
+    makes Python's JSON parser recurse until it raises RecursionError, which
+    nothing downstream expects and surfaces as a 500. The depth that triggers it
+    differs between Python versions, so it can pass on one machine and fail on
+    another. Reported as the ValueError a malformed body already produces, which
+    get_json turns into the usual 400 -- or into None when called silently.
+    """
+
+    def loads(self, s, **kwargs):
+        try:
+            return super().loads(s, **kwargs)
+        except RecursionError:
+            raise ValueError('JSON is nested too deeply.') from None
+
+
+app.json = _SafeJSONProvider(app)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 _database_url = os.environ.get('DATABASE_URL')
 
