@@ -1,0 +1,97 @@
+{# In-page replacement for window.confirm(), shared by every page.
+   Self-contained: its own classes (cd-*), and colours with fallbacks, so it
+   renders the same whatever CSS the host page defines.
+
+   Usage:  if (!await confirmDialog({ title, message, confirmLabel, danger, icon })) return;
+   Resolves true on confirm; false on Cancel, Escape, or a backdrop click. #}
+<style>
+  .cd-overlay {
+    display: none; position: fixed; inset: 0; z-index: 1000;
+    background: rgba(0,0,0,.45); align-items: center; justify-content: center; padding: 16px;
+  }
+  .cd-overlay.open { display: flex; }
+  .cd-box {
+    background: #fff; border-radius: var(--radius, 16px);
+    box-shadow: 0 20px 60px rgba(0,0,0,.2);
+    width: 100%; max-width: 400px; max-height: calc(100vh - 32px);
+    display: flex; flex-direction: column; font-family: 'Inter', sans-serif;
+  }
+  .cd-header { padding: 28px 28px 0; margin-bottom: 14px; }
+  .cd-title {
+    font-size: 1.05rem; font-weight: 700; color: var(--text, #0F172A);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .cd-body { padding: 0 28px; overflow-y: auto; }
+  .cd-message { color: var(--muted, #64748B); font-size: .92rem; line-height: 1.5; margin: 0; white-space: pre-line; }
+  .cd-footer { display: flex; gap: 10px; justify-content: flex-end; padding: 24px 28px 28px; }
+  .cd-btn {
+    padding: 10px 20px; border-radius: var(--radius-sm, 10px); font-size: .88rem; font-weight: 600;
+    cursor: pointer; font-family: 'Inter', sans-serif; transition: background .15s, opacity .15s;
+  }
+  .cd-cancel { padding: 10px 18px; border: 1.5px solid var(--border, #E2E8F0); background: #fff; color: var(--muted, #64748B); }
+  .cd-cancel:hover { background: var(--bg, #F1F5F9); }
+  .cd-ok { border: none; color: #fff; background: var(--grad, linear-gradient(135deg, #4F46E5 0%, #7C3AED 100%)); }
+  .cd-ok:hover { opacity: .9; }
+  .cd-ok.danger { background: #DC2626; }
+  .cd-ok.danger:hover { background: #B91C1C; opacity: 1; }
+</style>
+
+<div class="cd-overlay" id="confirmModal">
+  <div class="cd-box" role="alertdialog" aria-modal="true"
+       aria-labelledby="confirmTitle" aria-describedby="confirmMessage">
+    <div class="cd-header">
+      <div class="cd-title"><i id="confirmIcon" class="fas fa-trash-alt"></i> <span id="confirmTitle"></span></div>
+    </div>
+    <div class="cd-body"><p class="cd-message" id="confirmMessage"></p></div>
+    <div class="cd-footer">
+      <button type="button" class="cd-btn cd-cancel" id="confirmCancel">Cancel</button>
+      <button type="button" class="cd-btn cd-ok" id="confirmOk">OK</button>
+    </div>
+  </div>
+</div>
+
+<script>
+function confirmDialog({ title, message, confirmLabel = 'OK', danger = true, icon }) {
+  return new Promise(resolve => {
+    const overlay = document.getElementById('confirmModal');
+    const okBtn = document.getElementById('confirmOk');
+    const cancelBtn = document.getElementById('confirmCancel');
+    const iconEl = document.getElementById('confirmIcon');
+    const previouslyFocused = document.activeElement;
+    document.getElementById('confirmTitle').textContent = title;
+    document.getElementById('confirmMessage').textContent = message;
+    okBtn.textContent = confirmLabel;
+    okBtn.classList.toggle('danger', danger);
+    iconEl.className = 'fas ' + (icon || (danger ? 'fa-trash-alt' : 'fa-question-circle'));
+    iconEl.style.color = danger ? '#DC2626' : 'var(--primary, #4F46E5)';
+
+    function finish(result) {
+      overlay.classList.remove('open');
+      okBtn.removeEventListener('click', onOk);
+      cancelBtn.removeEventListener('click', onCancel);
+      overlay.removeEventListener('click', onBackdrop);
+      document.removeEventListener('keydown', onKey, true);
+      if (previouslyFocused && previouslyFocused.focus) previouslyFocused.focus();
+      resolve(result);
+    }
+    const onOk = () => finish(true);
+    const onCancel = () => finish(false);
+    const onBackdrop = e => { if (e.target === overlay) finish(false); };
+    const onKey = e => {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); finish(false); }
+      else if (e.key === 'Tab') {
+        // Keep focus inside the dialog while it is open.
+        e.preventDefault();
+        (document.activeElement === cancelBtn ? okBtn : cancelBtn).focus();
+      }
+    };
+    okBtn.addEventListener('click', onOk);
+    cancelBtn.addEventListener('click', onCancel);
+    overlay.addEventListener('click', onBackdrop);
+    document.addEventListener('keydown', onKey, true);
+    overlay.classList.add('open');
+    // Default focus on Cancel so a stray Enter can never confirm anything.
+    cancelBtn.focus();
+  });
+}
+</script>

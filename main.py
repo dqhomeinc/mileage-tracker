@@ -1,6 +1,7 @@
 import base64
 from functools import wraps
 import hashlib
+import time
 import hmac
 import json
 import math
@@ -97,10 +98,30 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 # leaves stale connections sitting in the pool. pool_pre_ping catches those
 # with a cheap check before use instead of failing mid-query; pool_recycle
 # avoids handing out connections idle long enough to be suspect anyway.
+# Neon's free tier suspends the compute when idle, and waking it takes a few
+# seconds. Without a timeout a connect that never answers blocks for ever --
+# and because the schema is prepared at import, that blocks the import, so
+# gunicorn never binds a port and the platform reports "no open ports detected"
+# with nothing at all to diagnose. A timeout turns that into a named error in
+# seconds.
+DB_CONNECT_TIMEOUT = 10
+
+# How many times to try preparing the schema at startup. Waking a suspended
+# compute is the expected reason for the first attempt to fail, so a couple of
+# retries covers it; past that the database is genuinely unreachable and the
+# right outcome is a failed deploy that says so.
+DB_STARTUP_ATTEMPTS = 3
+
 app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
     'pool_pre_ping': True,
     'pool_recycle': 280,
 }
+# Only for a real server. SQLite accepts a `timeout` too, but it means how long
+# to wait for a file lock, which is a different thing entirely.
+if not _db_url.startswith('sqlite'):
+    app.config['SQLALCHEMY_ENGINE_OPTIONS']['connect_args'] = {
+        'timeout': DB_CONNECT_TIMEOUT,
+    }
 
 # Brevo (HTTPS email API) — Railway blocks outbound SMTP on non-Pro plans,
 # so password reset emails are sent over HTTPS instead of raw SMTP.
@@ -1578,7 +1599,8 @@ def _windows_overlap(a, b):
     return a[0] < b[1] and b[0] < a[1]
 
 
-def find_overlapping_trip(user_id, start, end, trip_date, window):
+def find_overlapping_trip(user_id, start, end, trip_date, window,
+                          exclude_trip_id=None):
     """A trip on the same route whose time overlaps `window`, or None.
 
     This is the case that cannot be explained away. Two visits to one client in
@@ -1596,6 +1618,10 @@ def find_overlapping_trip(user_id, start, end, trip_date, window):
     only which trip gets described back to the caller when more than one
     overlaps, and the earliest is the clearer answer to "you already logged
     this".
+
+    exclude_trip_id leaves one trip out of the comparison, for an edit: a trip
+    always overlaps itself, so without this every save would be refused by the
+    row it is saving.
     """
     if not (start and end and trip_date and window):
         return None
@@ -1604,11 +1630,12 @@ def find_overlapping_trip(user_id, start, end, trip_date, window):
         return None
     nearby = [(day + timedelta(days=offset)).isoformat() for offset in (-1, 0, 1)]
 
-    candidates = (Trip.query
-                  .filter_by(user_id=user_id, start_location=start, end_location=end)
-                  .filter(Trip.trip_date.in_(nearby))
-                  .order_by(Trip.id)
-                  .all())
+    query = (Trip.query
+             .filter_by(user_id=user_id, start_location=start, end_location=end)
+             .filter(Trip.trip_date.in_(nearby)))
+    if exclude_trip_id is not None:
+        query = query.filter(Trip.id != exclude_trip_id)
+    candidates = query.order_by(Trip.id).all()
     for candidate in candidates:
         other = _trip_window(candidate.trip_date, candidate.start_time,
                              candidate.end_time, _trip_end_date(candidate),
@@ -1866,6 +1893,28 @@ def update_trip(trip_id):
         distance_miles = parse_miles(distance_miles)
     except ValueError as e:
         return jsonify({'error': str(e)}), 400
+
+    # The same rule the log form enforces, for the same reason: a trip cannot be
+    # driven twice over the same hours, and that is as true of an edit as of a
+    # new entry. Without it the refusal on logging is only a speed bump -- a
+    # trip could be logged at a free time and then edited to the overlapping
+    # one it was refused at.
+    #
+    # Checked against every trip except this one. A trip always overlaps itself,
+    # so leaving it in would refuse every save by the row being saved.
+    window = _trip_window(trip_date, start_time, end_time, end_date,
+                          data.get('duration_seconds') or trip.duration_seconds)
+    clash = find_overlapping_trip(current_user.id, start, end, trip_date, window,
+                                  exclude_trip_id=trip.id)
+    if clash:
+        return jsonify({
+            'duplicate': True,
+            'can_confirm': False,
+            'error': 'Another trip on this route already covers those hours, '
+                     'so this edit was not saved.',
+            'existing': _duplicate_summary(clash),
+        }), 409
+
 
     vehicle_id  = _as_id(data.get('vehicle_id'))
     vehicle_name = vehicle_sub = None
@@ -2892,9 +2941,39 @@ def api_list_businesses():
 # Entry point
 # ---------------------------------------------------------------------------
 
-with app.app_context():
-    db.create_all()
-    _migrate_db()
+def _prepare_database():
+    """Create any new tables and run the column migrations, with retries.
+
+    Retried because the first connect after an idle period is waking a
+    suspended compute, and that is an expected slow path rather than a fault.
+    Raised after the last attempt because a half-prepared schema is worse than
+    a failed deploy: the app would start and then fail on whichever query
+    needed the missing column.
+    """
+    last_error = None
+    for attempt in range(1, DB_STARTUP_ATTEMPTS + 1):
+        try:
+            with app.app_context():
+                db.create_all()
+                _migrate_db()
+            return
+        except Exception as exc:  # noqa: BLE001 — retried, then re-raised below
+            last_error = exc
+            app.logger.warning(
+                'Could not prepare the database (attempt %s of %s): %s',
+                attempt, DB_STARTUP_ATTEMPTS, exc)
+            if attempt < DB_STARTUP_ATTEMPTS:
+                time.sleep(2 * attempt)
+
+    raise RuntimeError(
+        f'Could not reach the database after {DB_STARTUP_ATTEMPTS} attempts: '
+        f'{last_error}. The app refuses to start rather than serve requests '
+        'against a schema it could not prepare. Check the database is awake '
+        'and DATABASE_URL is correct.'
+    ) from last_error
+
+
+_prepare_database()
 
 if __name__ == '__main__':
     app.run(debug=True)
