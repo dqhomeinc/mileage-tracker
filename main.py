@@ -192,9 +192,22 @@ class User(UserMixin, db.Model):
 # capable than it is.
 API_SCOPES = {
     'trips:create':    'Log trips',
+    'trips:read':      'Read your trip history',
+    'trips:update':    'Edit trips you have already logged',
+    'trips:delete':    'Delete trips permanently',
     'vehicles:read':   'Read your vehicles',
     'businesses:read': 'Read your businesses',
 }
+
+# Ticked when the create form first opens. Only what an agent needs to log
+# trips: the permissions that read back or change or destroy existing records
+# are opt-in, so granting one is always a choice rather than a default.
+API_DEFAULT_SCOPES = ('trips:create', 'vehicles:read', 'businesses:read')
+
+# What every key could do before permissions existed. Used once, to fill in keys
+# that were created then; it must not grow when a scope is added to the
+# registry, or an old key would silently gain the new reach.
+API_LEGACY_SCOPES = ('trips:create', 'vehicles:read', 'businesses:read')
 
 
 def parse_scopes(raw):
@@ -539,7 +552,7 @@ def _migrate_db():
                 # the column is first added -- everywhere else a blank value
                 # grants nothing.
                 conn.execute(db.text('UPDATE api_key SET scopes = :s'),
-                             {'s': ','.join(API_SCOPES)})
+                             {'s': ','.join(API_LEGACY_SCOPES)})
 
         if 'logging_key' not in existing_user_cols:
             conn.execute(db.text('ALTER TABLE "user" ADD COLUMN logging_key VARCHAR(32)'))
@@ -2356,6 +2369,7 @@ def profile():
         photo_data=current_user.photo_data,
         api_keys=[_api_key_dict(k) for k in _owned_api_keys()],
         api_scopes=API_SCOPES,
+        api_default_scopes=list(API_DEFAULT_SCOPES),
         api_base_url=request.url_root.rstrip('/'),
     )
 
@@ -2811,6 +2825,46 @@ _API_TRIP_FIELDS = {'start_location', 'end_location', 'started_at', 'ended_at',
                     'notes', 'vehicle_id', 'business_id', 'stops', 'miles'}
 
 
+def _unknown_trip_fields(data):
+    """A 422 response naming any field the trip API does not know, else None."""
+    unknown = set(data) - _API_TRIP_FIELDS
+    if not unknown:
+        return None
+    hint = (' Note that start/end are locations here, and times are '
+            'started_at/ended_at.' if unknown & _API_TRIP_ALIASES else '')
+    return jsonify({'error': f'Unknown fields: {", ".join(sorted(unknown))}. '
+                             f'Expected: {", ".join(sorted(_API_TRIP_FIELDS))}.{hint}'}), 422
+
+
+def _api_trip_dict(trip):
+    """A trip as the API describes it, in the API's own field names.
+
+    The same names a caller sends, so a trip read back can be edited by changing
+    a field. Leaves out receipt attachments and place ids: a receipt can be a
+    photograph of anything, and nothing here lets a caller do anything with it.
+    """
+    started = (f'{trip.trip_date}T{trip.start_time}'
+               if trip.trip_date and trip.start_time else trip.trip_date)
+    end_date = _trip_end_date(trip) or trip.trip_date
+    ended = (f'{end_date}T{trip.end_time}' if end_date and trip.end_time else None)
+    return {
+        'id': trip.id,
+        'start_location': trip.start_location,
+        'end_location': trip.end_location,
+        'started_at': started,
+        'ended_at': ended,
+        'miles': trip.distance_miles,
+        'duration_seconds': trip.duration_seconds,
+        'notes': trip.notes,
+        'stops': _stops_from_db(trip.stops),
+        'vehicle_id': trip.vehicle_id,
+        'vehicle': trip.vehicle.name if trip.vehicle else None,
+        'business_id': trip.business_id,
+        'business': trip.business.name if trip.business else None,
+        'logged_via': trip.created_via or 'web',
+    }
+
+
 @app.route('/api/v1/trips', methods=['POST'])
 @api_key_required('trips:create')
 def api_create_trip():
@@ -2825,12 +2879,9 @@ def api_create_trip():
     if not isinstance(data, dict):
         return jsonify({'error': 'Send a JSON object with Content-Type: application/json.'}), 422
 
-    unknown = set(data) - _API_TRIP_FIELDS
-    if unknown:
-        hint = (' Note that start/end are locations here, and times are '
-                'started_at/ended_at.' if unknown & _API_TRIP_ALIASES else '')
-        return jsonify({'error': f'Unknown fields: {", ".join(sorted(unknown))}. '
-                                 f'Expected: {", ".join(sorted(_API_TRIP_FIELDS))}.{hint}'}), 422
+    refused = _unknown_trip_fields(data)
+    if refused:
+        return refused
 
     start = (data.get('start_location') or '').strip()
     end = (data.get('end_location') or '').strip()
@@ -2946,6 +2997,222 @@ def api_create_trip():
         'business': business_name,
         'warning': warning,
     }), 201
+
+
+API_PAGE_DEFAULT = 50
+API_PAGE_MAX = 200
+
+
+def _page_arg(name, default, low, high):
+    """An integer query argument within bounds, or raise ValueError."""
+    raw = request.args.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError(f'{name} must be a whole number.')
+    if not low <= value <= high:
+        raise ValueError(f'{name} must be between {low} and {high}.')
+    return value
+
+
+@app.route('/api/v1/trips', methods=['GET'])
+@api_key_required('trips:read')
+def api_list_trips():
+    """The key owner's trips, newest first, a page at a time.
+
+    Paged because a log only grows and a response should not: the cap is on
+    what one request can return, not on how much history can be read.
+    """
+    try:
+        limit = _page_arg('limit', API_PAGE_DEFAULT, 1, API_PAGE_MAX)
+        offset = _page_arg('offset', 0, 0, 10**9)
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 422
+    trips = Trip.query.filter_by(user_id=g.api_user.id).all()
+    trips.sort(key=lambda t: (t.trip_date or (t.timestamp.strftime('%Y-%m-%d')
+                                              if t.timestamp else ''), t.id),
+               reverse=True)
+    return jsonify({
+        'total': len(trips), 'limit': limit, 'offset': offset,
+        'trips': [_api_trip_dict(t) for t in trips[offset:offset + limit]],
+    })
+
+
+@app.route('/api/v1/trips/<int:trip_id>', methods=['GET'])
+@api_key_required('trips:read')
+def api_get_trip(trip_id):
+    trip = Trip.query.filter_by(id=trip_id, user_id=g.api_user.id).first()
+    if not trip:
+        return jsonify({'error': 'Trip not found.'}), 404
+    return jsonify(_api_trip_dict(trip))
+
+
+@app.route('/api/v1/trips/<int:trip_id>', methods=['PATCH'])
+@api_key_required('trips:update')
+def api_update_trip(trip_id):
+    """Change some fields of one trip; anything not sent is left alone.
+
+    Held to the same rules as logging one: the same validators, mileage
+    measured by the server rather than asserted, and the same refusal when the
+    result would overlap another trip on the route -- checked against every
+    trip but this one, since a trip always overlaps itself.
+    """
+    # 404 for a trip that is not the owner's exactly as for one that does not
+    # exist, so ids cannot be probed for.
+    trip = Trip.query.filter_by(id=trip_id, user_id=g.api_user.id).first()
+    if not trip:
+        return jsonify({'error': 'Trip not found.'}), 404
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'error': 'Send a JSON object with Content-Type: application/json.'}), 422
+    refused = _unknown_trip_fields(data)
+    if refused:
+        return refused
+    if not data:
+        return jsonify({'error': 'Send at least one field to change.'}), 422
+
+    for name in ('start_location', 'end_location', 'notes'):
+        if name in data and data[name] is not None and not isinstance(data[name], str):
+            return jsonify({'error': f'{name} must be text.'}), 422
+
+    start, end = trip.start_location, trip.end_location
+    if 'start_location' in data:
+        start = (data['start_location'] or '').strip()
+    if 'end_location' in data:
+        end = (data['end_location'] or '').strip()
+    if not start or not end:
+        return jsonify({'error': 'start_location and end_location cannot be blank.'}), 422
+
+    trip_date, start_time = trip.trip_date, trip.start_time
+    end_date, end_time = _trip_end_date(trip), trip.end_time
+    times_sent = 'started_at' in data or 'ended_at' in data
+    if times_sent:
+        # Together, because each only makes sense against the other: moving the
+        # start while keeping the old end would silently stretch or invert the
+        # trip.
+        if 'started_at' not in data or 'ended_at' not in data:
+            return jsonify({'error': 'Send started_at and ended_at together '
+                                     '(ended_at may be null).'}), 422
+        try:
+            trip_date, start_time = _split_iso_datetime(data.get('started_at'), 'started_at')
+            end_date, end_time = (None, None)
+            if data.get('ended_at'):
+                end_date, end_time = _split_iso_datetime(data.get('ended_at'), 'ended_at')
+        except ValueError as exc:
+            return jsonify({'error': str(exc)}), 422
+        date_error = validate_trip_date(trip_date, client_today=trip_date)
+        if date_error:
+            return jsonify({'error': date_error}), 422
+        date_error = validate_end_date(end_date, trip_date, start_time, end_time)
+        if date_error:
+            return jsonify({'error': date_error}), 422
+
+    stored_stops = _stops_from_db(trip.stops)
+    stops = stored_stops
+    if 'stops' in data:
+        try:
+            stops = _clean_stops(data['stops'])
+        except ValueError as exc:
+            return jsonify({'error': str(exc)}), 422
+    route_changed = (start != trip.start_location or end != trip.end_location
+                     or stops != stored_stops)
+    time_changed = times_sent and (
+        (trip_date, start_time, end_date, end_time)
+        != (trip.trip_date, trip.start_time, _trip_end_date(trip), trip.end_time))
+
+    user = g.api_user
+    vehicle_id, business_id = trip.vehicle_id, trip.business_id
+    if 'vehicle_id' in data:
+        if data['vehicle_id'] is None:
+            vehicle_id = None
+        else:
+            vehicle_id = _resolve_vehicle_for(user.id, data['vehicle_id'])[0]
+            if vehicle_id is None:
+                # Unlike logging a new trip, which drops an unknown id, an edit
+                # has a value to lose: a mistyped id must not wipe the vehicle.
+                return jsonify({'error': 'vehicle_id is not one of your vehicles.'}), 422
+    if 'business_id' in data:
+        if data['business_id'] is None:
+            business_id = None
+        else:
+            business_id = _resolve_business_for(user.id, data['business_id'])[0]
+            if business_id is None:
+                return jsonify({'error': 'business_id is not one of your businesses.'}), 422
+
+    # Only when the route or the hours moved. An edit of the notes should not
+    # be refused because of a pair that was already there.
+    if route_changed or time_changed:
+        window = _trip_window(trip_date, start_time, end_time, end_date,
+                              trip.duration_seconds)
+        clash = find_overlapping_trip(user.id, start, end, trip_date, window,
+                                      exclude_trip_id=trip.id)
+        if clash:
+            return jsonify({
+                'duplicate': True,
+                'can_confirm': False,
+                'error': 'Another trip on this route already covers those hours, '
+                         'so this edit was not saved.',
+                'existing': _duplicate_summary(clash),
+            }), 409
+
+    distance_miles, duration_seconds = trip.distance_miles, trip.duration_seconds
+    if route_changed:
+        # The stored mileage described a different route. Measured again, never
+        # asserted; a supplied value is the fallback only if that fails, and
+        # with neither the trip is left without a figure rather than a wrong one.
+        distance_miles = duration_seconds = None
+        try:
+            distance_miles, duration_seconds, _endpoints = calculate_driving_miles(
+                start, end, stops=stops)
+        except Exception:
+            supplied = data.get('miles')
+            if supplied is not None:
+                try:
+                    distance_miles = parse_miles(supplied)
+                except ValueError as exc:
+                    return jsonify({'error': str(exc)}), 422
+
+    trip.start_location, trip.end_location = start, end
+    trip.stops = json.dumps(stops) if stops else None
+    trip.trip_date, trip.start_time = trip_date, start_time
+    trip.end_time = end_time
+    trip.end_date = end_date or _derived_end_date(trip_date, start_time, end_time)
+    trip.vehicle_id, trip.business_id = vehicle_id, business_id
+    if 'notes' in data:
+        trip.notes = _clean_notes(data['notes'])
+    trip.distance_miles, trip.duration_seconds = distance_miles, duration_seconds
+    db.session.commit()
+
+    result = _api_trip_dict(trip)
+    result['warning'] = (check_trip_feasibility(trip.start_time, trip.end_time,
+                                                distance_miles, duration_seconds,
+                                                stop_count=len(stops),
+                                                trip_date=trip.trip_date,
+                                                end_date=trip.end_date)
+                         if distance_miles is not None else None)
+    return jsonify(result)
+
+
+@app.route('/api/v1/trips/<int:trip_id>', methods=['DELETE'])
+@api_key_required('trips:delete')
+def api_delete_trip(trip_id):
+    """Delete one trip, and its attachments, permanently.
+
+    The most destructive thing a key can be allowed to do and there is no undo,
+    so it leaves a line in the server log naming the key. That is the only
+    trace: the trip itself is gone.
+    """
+    trip = Trip.query.filter_by(id=trip_id, user_id=g.api_user.id).first()
+    if not trip:
+        return jsonify({'error': 'Trip not found.'}), 404
+    TripAttachment.query.filter_by(trip_id=trip.id).delete()
+    db.session.delete(trip)
+    db.session.commit()
+    app.logger.info('API key %s (%s) deleted trip %s for user %s',
+                    g.api_key.id, g.api_key.public_id, trip_id, g.api_user.id)
+    return jsonify({'deleted': trip_id})
 
 
 @app.route('/api/v1/vehicles', methods=['GET'])
