@@ -143,6 +143,7 @@
 <body>
 
 {% include '_navbar.html' %}
+{% include '_confirm_dialog.html' %}
 
 <div class="page">
 
@@ -329,7 +330,7 @@ async function saveVehicle() {
 }
 
 async function deleteVehicle(id) {
-  if (!confirm('Remove this vehicle? Trips using it will have the vehicle cleared.')) return;
+  if (!await confirmDialog({ title: 'Remove vehicle?', message: 'Trips using it will have the vehicle cleared.', confirmLabel: 'Remove' })) return;
   try {
     const resp = await fetch(`/vehicles/${id}`, { method: 'DELETE' });
     if (!resp.ok) return;

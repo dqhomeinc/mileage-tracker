@@ -502,6 +502,7 @@
 
 {% set show_time_toggle = true %}
 {% include '_navbar.html' %}
+{% include '_confirm_dialog.html' %}
 
 <div class="page">
 
@@ -2777,7 +2778,12 @@ document.getElementById('logTripBtn').addEventListener('click', async () => {
         showError(`${data.error} ${describeDuplicate(data.existing, { inline: true })}`);
         return;
       }
-      if (!confirm(`${describeDuplicate(data.existing)}\n\nLog it again anyway?`)) {
+      const logAgain = await confirmDialog({
+        title: 'Possible duplicate',
+        message: `${describeDuplicate(data.existing)}\n\nLog it again anyway?`,
+        confirmLabel: 'Log it anyway', danger: false, icon: 'fa-exclamation-triangle',
+      });
+      if (!logAgain) {
         showError('Trip not logged — it looks like you had already logged it.');
         return;
       }
@@ -2973,7 +2979,12 @@ function prependTripRow(trip, prepend = true) {
 }
 
 async function deleteTrip(id, miles) {
-  if (!confirm('Delete this trip?')) return;
+  const ok = await confirmDialog({
+    title: 'Delete trip?',
+    message: 'This trip will be permanently removed from your log. This cannot be undone.',
+    confirmLabel: 'Delete',
+  });
+  if (!ok) return;
   try {
     const resp = await fetch(`/history/${id}`, { method: 'DELETE' });
     if (!resp.ok) return;
@@ -3330,6 +3341,13 @@ async function saveEdit() {
       body: JSON.stringify(payload)
     });
     const data = await resp.json();
+    // A 409 names the trip this edit collided with, which is more use than
+    // the message alone: the modal is still open on the times that were
+    // refused, so the answer to "why" is which other trip already has them.
+    if (resp.status === 409 && data.duplicate) {
+      alert(`${data.error}\n\n${describeDuplicate(data.existing)}`);
+      return;
+    }
     if (!resp.ok) { alert(data.error || 'Failed to save.'); return; }
 
     // Full re-render rather than patching the row in place: the trip's date
