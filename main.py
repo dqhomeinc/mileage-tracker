@@ -2861,6 +2861,28 @@ def api_create_trip():
         return jsonify({'error': str(exc)}), 422
 
     user = g.api_user
+
+    # Before the vehicle lookup and the billable distance measurement, so a
+    # trip that is about to be refused costs nothing. The same two rules as the
+    # form, and for the same reason -- an agent retrying after a timeout is the
+    # likeliest way to log a trip twice, which is what this is here to stop.
+    #
+    # Overlapping hours on the same route are refused outright: nothing a
+    # caller could say makes it true. The first trip recorded is kept. A start
+    # time is required here, so there is always a window -- an identical start
+    # with no end overlaps as an instant, and there is no "untimed" case to ask
+    # about as the form has.
+    window = _trip_window(trip_date, start_time, end_time, end_date, None)
+    clash = find_overlapping_trip(user.id, start, end, trip_date, window)
+    if clash:
+        return jsonify({
+            'duplicate': True,
+            'can_confirm': False,
+            'error': 'This trip was already logged over the same hours, so it '
+                     'was not logged again. Only the first was kept.',
+            'existing': _duplicate_summary(clash),
+        }), 409
+
     vehicle_id, vehicle_name, vehicle_sub = _resolve_vehicle_for(user.id, data.get('vehicle_id'))
     business_id, business_name = _resolve_business_for(user.id, data.get('business_id'))
 

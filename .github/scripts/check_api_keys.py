@@ -182,7 +182,25 @@ BODY = {'start_location': 'Lexington, MA', 'end_location': 'Newton, MA',
         'started_at': '2026-10-08T08:29', 'ended_at': '2026-10-08T09:10',
         'notes': 'site visit', 'vehicle_id': JANE_VEHICLE}
 
-created = anon.post('/api/v1/trips', headers=auth(JANE_KEY), json=BODY)
+_body_day = [0]
+
+
+def body(extra=None):
+    """BODY on a day of its own, plus any overrides.
+
+    The API now refuses a trip that overlaps one already logged, so the many
+    checks below that each post "a trip" would refuse each other if they all
+    used the same hours. Each call moves a day on; the first is BODY exactly.
+    """
+    from datetime import date, timedelta
+    day = date(2026, 10, 8) + timedelta(days=_body_day[0])
+    _body_day[0] += 1
+    shifted = {**BODY,
+               'started_at': f'{day}T08:29', 'ended_at': f'{day}T09:10'}
+    return {**shifted, **(extra or {})}
+
+
+created = anon.post('/api/v1/trips', headers=auth(JANE_KEY), json=body())
 expect('a trip is created', created.status_code, 201)
 TRIP_ID = field(created, 'id')
 with main.app.app_context():
@@ -196,7 +214,7 @@ with main.app.app_context():
 
 # Measured, not asserted. A supplied value must lose to the measurement.
 supplied = anon.post('/api/v1/trips', headers=auth(JANE_KEY),
-                     json={**BODY, 'miles': 999.0})
+                     json=body({'miles': 999.0}))
 expect('a supplied mileage does not override the measurement',
        field(supplied, 'miles'), MEASURED[0])
 
@@ -205,10 +223,10 @@ expect('a supplied mileage does not override the measurement',
 measure_patch.stop()
 with patch.object(main, 'calculate_driving_miles', side_effect=RuntimeError('no route')):
     fell_back = anon.post('/api/v1/trips', headers=auth(JANE_KEY),
-                          json={**BODY, 'miles': 8.47})
+                          json=body({'miles': 8.47}))
     expect('a supplied mileage is used when measuring fails',
            field(fell_back, 'miles'), 8.47)
-    no_value = anon.post('/api/v1/trips', headers=auth(JANE_KEY), json=BODY)
+    no_value = anon.post('/api/v1/trips', headers=auth(JANE_KEY), json=body())
     expect('and a trip with neither is still recorded, without a distance',
            (no_value.status_code, field(no_value, 'miles')), (201, None))
 measure_patch.start()
@@ -225,7 +243,7 @@ with patch.object(main, 'calculate_driving_miles', side_effect=RuntimeError('no 
                        (-5, 'a negative mileage'), (10 ** 9, 'an absurd mileage'),
                        ('abc', 'a non-numeric mileage'), ([1], 'a list')):
         resp = anon.post('/api/v1/trips', headers=auth(JANE_KEY),
-                         json={**BODY, 'miles': bad})
+                         json=body({'miles': bad}))
         expect(f'{label} is refused rather than stored', resp.status_code, 422)
 
     # And nothing non-finite reached the database on the way to being refused.
@@ -243,19 +261,19 @@ for bad, label in (('abc', 'a non-numeric vehicle_id'), ('1.5', 'a fractional id
                    ('9' * 5000, 'a 5000-digit string'), (2 ** 70, 'an int past 64 bits'),
                    ('9' * 25, 'a 25-digit string'), (-(2 ** 70), 'a hugely negative int')):
     resp = anon.post('/api/v1/trips', headers=auth(JANE_KEY),
-                     json={**BODY, 'vehicle_id': bad})
+                     json=body({'vehicle_id': bad}))
     expect(f'{label} does not crash the request', resp.status_code, 201)
     expect(f'{label} attaches no vehicle', field(resp, 'vehicle'), None)
 
 for bad_id in ('\u00b2', '9' * 5000, 2 ** 70):
-    r = anon.post('/api/v1/trips', headers=auth(JANE_KEY), json={**BODY, 'business_id': bad_id})
+    r = anon.post('/api/v1/trips', headers=auth(JANE_KEY), json=body({'business_id': bad_id}))
     expect(f'a junk business_id {str(bad_id)[:8]!r} does not crash', r.status_code, 201)
 # Plain ids, including padded ones, still resolve.
 expect('an ordinary id still resolves', (main._as_id(7), main._as_id(' 7 '), main._as_id('-3')), (7, 7, -3))
 expect('the largest valid id still resolves', main._as_id(2 ** 63 - 1), 2 ** 63 - 1)
 expect('one past it does not', main._as_id(2 ** 63), None)
 resp = anon.post('/api/v1/trips', headers=auth(JANE_KEY),
-                 json={**BODY, 'business_id': 'abc'})
+                 json=body({'business_id': 'abc'}))
 expect('a non-numeric business_id does not crash either', resp.status_code, 201)
 expect('and attaches no business', field(resp, 'business'), None)
 
@@ -269,12 +287,12 @@ expect('and explains the collision rather than only listing fields',
        'locations here' in field(old_spec, 'error'), True)
 
 tz = anon.post('/api/v1/trips', headers=auth(JANE_KEY),
-               json={**BODY, 'started_at': '2026-10-08T08:29+00:00'})
+               json=body({'started_at': '2026-10-08T08:29+00:00'}))
 expect('an offset-aware datetime is refused rather than converted', tz.status_code, 422)
 expect('and says why', 'local' in field(tz, 'error'), True)
 
-for bad, label in (({**BODY, 'start_location': ''}, 'a blank start location'),
-                   ({**BODY, 'started_at': 'yesterday'}, 'an unparseable datetime'),
+for bad, label in ((body({'start_location': ''}), 'a blank start location'),
+                   (body({'started_at': 'yesterday'}), 'an unparseable datetime'),
                    ({k: v for k, v in BODY.items() if k != 'started_at'}, 'a missing start')):
     expect(f'{label} is refused',
            anon.post('/api/v1/trips', headers=auth(JANE_KEY), json=bad).status_code, 422)
@@ -284,7 +302,7 @@ expect('a non-object body is refused',
 # ── The logging key relationship ─────────────────────────────────────
 # The API deliberately does not ask for it; the form still must.
 expect('the API does not require the per-trip logging key',
-       anon.post('/api/v1/trips', headers=auth(JANE_KEY), json=BODY).status_code, 201)
+       anon.post('/api/v1/trips', headers=auth(JANE_KEY), json=body()).status_code, 201)
 expect('while /log still does',
        jane_client.post('/log', json={'start': 'a', 'end': 'b',
                                       'trip_date': '2026-10-08'}).status_code, 403)
@@ -293,7 +311,7 @@ expect('while /log still does',
 bob_key = field(mint(bob_client, name='bob script'), 'key')
 expect('a key cannot attach another user\'s vehicle',
        field(anon.post('/api/v1/trips', headers=auth(bob_key),
-                       json={**BODY, 'vehicle_id': JANE_VEHICLE}), 'vehicle'), None)
+                       json=body({'vehicle_id': JANE_VEHICLE})), 'vehicle'), None)
 with main.app.app_context():
     expect('and the trip belongs to the key\'s owner, not the vehicle\'s',
            main.Trip.query.order_by(main.Trip.id.desc()).first().user_id, BOB_ID)
@@ -307,7 +325,7 @@ for label, header in (('a missing header', {}),
                       ('an unknown public id', {'Authorization': 'Bearer mtk_ffffffffffff.whatever'}),
                       ('the right public id with a wrong secret',
                        {'Authorization': f'Bearer {JANE_KEY.split(".")[0]}.wrongsecret'})):
-    resp = anon.post('/api/v1/trips', headers=header, json=BODY)
+    resp = anon.post('/api/v1/trips', headers=header, json=body())
     expect(f'{label} is refused', resp.status_code, 401)
     expect(f'{label} gets the same message as any other',
            field(resp, 'error'), 'Invalid or missing API key.')
@@ -316,7 +334,7 @@ for label, header in (('a missing header', {}),
 expect('revoking does not need the password',
        jane_client.delete(f'/profile/api-keys/{JANE_KEY_ID}').status_code, 200)
 expect('a revoked key stops working at once',
-       anon.post('/api/v1/trips', headers=auth(JANE_KEY), json=BODY).status_code, 401)
+       anon.post('/api/v1/trips', headers=auth(JANE_KEY), json=body()).status_code, 401)
 with main.app.app_context():
     row = main.ApiKey.query.filter_by(id=JANE_KEY_ID).first()
     expect('the row survives revocation so its history stays visible',
@@ -361,7 +379,7 @@ expect('the next one is refused', over.status_code, 429)
 expect('and says what the limit is',
        str(main.API_RATE_LIMIT) in err(over), True)
 expect('writing is refused too, not just reading',
-       anon.post('/api/v1/trips', headers=auth(LIMITED_KEY), json=BODY).status_code, 429)
+       anon.post('/api/v1/trips', headers=auth(LIMITED_KEY), json=body()).status_code, 429)
 
 # A different key must have its own budget, or one busy client would stop
 # every other.
@@ -403,7 +421,7 @@ with main.app.app_context():
 # what it did. A trip has to be traceable to the key that logged it, and to
 # stay traceable after that key is revoked.
 audited = mint(jane_client, name='auditor').get_json()
-made = anon.post('/api/v1/trips', headers=auth(audited['key']), json=BODY)
+made = anon.post('/api/v1/trips', headers=auth(audited['key']), json=body())
 AUDIT_TRIP = made.get_json()['id']
 
 with main.app.app_context():
@@ -450,8 +468,8 @@ def scoped_key(*scopes):
 
 ROUTES = {
     'trips:create':    lambda c, k: c.post('/api/v1/trips', headers=auth(k),
-                                           json={**BODY, 'started_at': '2026-11-01T08:00',
-                                                 'ended_at': '2026-11-01T08:30'}),
+                                           json=body({'started_at': '2026-06-01T08:00',
+                                                 'ended_at': '2026-06-01T08:30'})),
     'vehicles:read':   lambda c, k: c.get('/api/v1/vehicles', headers=auth(k)),
     'businesses:read': lambda c, k: c.get('/api/v1/businesses', headers=auth(k)),
 }
@@ -545,6 +563,52 @@ try:
     expect('using the decorator bare is rejected', 'accepted', 'rejected')
 except ValueError:
     pass
+
+# ── Duplicates through the API ──────────────────────────────────────────
+dkey = scoped_key(*main.API_SCOPES)
+DUP = {'start_location': 'Dup Start', 'end_location': 'Dup End',
+       'started_at': '2026-09-01T09:00', 'ended_at': '2026-09-01T10:00'}
+first = anon.post('/api/v1/trips', headers=auth(dkey), json=DUP)
+expect('a fresh trip logs', first.status_code, 201)
+with main.app.app_context():
+    count = main.Trip.query.filter_by(user_id=JANE_ID).count()
+
+again = anon.post('/api/v1/trips', headers=auth(dkey), json=DUP)
+expect('the identical trip again is refused', again.status_code, 409)
+expect('and cannot be confirmed through', field(again, 'can_confirm'), False)
+expect('and describes the first', field(again, 'existing', {}).get('id'), field(first, 'id'))
+overlap = anon.post('/api/v1/trips', headers=auth(dkey),
+                    json={**DUP, 'started_at': '2026-09-01T09:30', 'ended_at': '2026-09-01T10:30'})
+expect('an overlapping window is refused', overlap.status_code, 409)
+with main.app.app_context():
+    expect('none of those was logged', main.Trip.query.filter_by(user_id=JANE_ID).count(), count)
+
+after = anon.post('/api/v1/trips', headers=auth(dkey),
+                  json={**DUP, 'started_at': '2026-09-01T10:00', 'ended_at': '2026-09-01T11:00'})
+expect('back-to-back on the same route is a genuine pair', after.status_code, 201)
+reverse = anon.post('/api/v1/trips', headers=auth(dkey),
+                    json={**DUP, 'start_location': 'Dup End', 'end_location': 'Dup Start'})
+expect('the return leg is not a duplicate', reverse.status_code, 201)
+
+# No end time: an identical start still overlaps as an instant.
+UNTIMED = {'start_location': 'U1', 'end_location': 'U2', 'started_at': '2026-09-02T09:00'}
+expect('a trip with no end time logs', anon.post('/api/v1/trips', headers=auth(dkey), json=UNTIMED).status_code, 201)
+again_u = anon.post('/api/v1/trips', headers=auth(dkey), json=UNTIMED)
+expect('the same start again is refused', (again_u.status_code, field(again_u, 'can_confirm')), (409, False))
+expect('confirm_duplicate is not a field', anon.post('/api/v1/trips', headers=auth(dkey),
+       json={**UNTIMED, 'confirm_duplicate': True}).status_code, 422)
+
+# Another account's identical trip is not a duplicate.
+bob_key = field(mint(bob_client, name='bobs'), 'key')
+expect('another account may log the same trip',
+       anon.post('/api/v1/trips', headers=auth(bob_key), json=DUP).status_code, 201)
+
+# A refused duplicate must not spend a Routes call.
+calls = []
+with patch.object(main, 'calculate_driving_miles',
+                  side_effect=lambda *a, **k: calls.append(1) or MEASURED):
+    anon.post('/api/v1/trips', headers=auth(dkey), json=DUP)
+expect('a refused duplicate makes no distance lookup', calls, [])
 
 measure_patch.stop()
 os.unlink(_db.name)
