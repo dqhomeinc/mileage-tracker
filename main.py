@@ -12,6 +12,8 @@ from datetime import datetime, date, timedelta, timezone
 import requests
 from dotenv import load_dotenv
 from itsdangerous import URLSafeTimedSerializer, SignatureExpired, BadSignature
+from werkzeug.routing import BaseConverter
+from flask.json.provider import DefaultJSONProvider
 from flask import (Flask, render_template, request, redirect, url_for, jsonify, flash,
                    session, Response, g)
 from flask_sqlalchemy import SQLAlchemy
@@ -28,6 +30,44 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 load_dotenv()
 
 app = Flask(__name__)
+
+
+class _IdConverter(BaseConverter):
+    """A record id in a URL: digits only, and no more than fit in a database
+    integer. Flask's own int converter accepts any number of digits, and an id
+    past 64 bits overflows the driver and surfaces as a 500 instead of simply
+    matching nothing. A longer one is a 404 here, before any handler runs."""
+    regex = r'\d{1,18}'
+
+    def to_python(self, value):
+        return int(value)
+
+    def to_url(self, value):
+        return str(int(value))
+
+
+app.url_map.converters['id'] = _IdConverter
+
+
+class _SafeJSONProvider(DefaultJSONProvider):
+    """Reads a request body without letting its shape crash the parser.
+
+    A body of a few thousand nested brackets fits well inside any size limit and
+    makes Python's JSON parser recurse until it raises RecursionError, which
+    nothing downstream expects and surfaces as a 500. The depth that triggers it
+    differs between Python versions, so it can pass on one machine and fail on
+    another. Reported as the ValueError a malformed body already produces, which
+    get_json turns into the usual 400 -- or into None when called silently.
+    """
+
+    def loads(self, s, **kwargs):
+        try:
+            return super().loads(s, **kwargs)
+        except RecursionError:
+            raise ValueError('JSON is nested too deeply.') from None
+
+
+app.json = _SafeJSONProvider(app)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 _database_url = os.environ.get('DATABASE_URL')
 
@@ -1881,7 +1921,7 @@ def history():
     ])
 
 
-@app.route('/history/<int:trip_id>', methods=['PATCH'])
+@app.route('/history/<id:trip_id>', methods=['PATCH'])
 @login_required
 def update_trip(trip_id):
     trip = Trip.query.filter_by(id=trip_id, user_id=current_user.id).first()
@@ -1995,7 +2035,7 @@ def update_trip(trip_id):
     return jsonify(resp)
 
 
-@app.route('/history/<int:trip_id>', methods=['DELETE'])
+@app.route('/history/<id:trip_id>', methods=['DELETE'])
 @login_required
 def delete_trip(trip_id):
     trip = Trip.query.filter_by(id=trip_id, user_id=current_user.id).first()
@@ -2062,7 +2102,7 @@ def _clean_filename(name):
     return name or 'attachment'
 
 
-@app.route('/trip/<int:trip_id>/attachments', methods=['POST'])
+@app.route('/trip/<id:trip_id>/attachments', methods=['POST'])
 @login_required
 def upload_attachment(trip_id):
     trip = _owned_trip(trip_id)
@@ -2095,7 +2135,7 @@ def upload_attachment(trip_id):
     return jsonify({'success': True, 'attachment': _attachment_dict(att)})
 
 
-@app.route('/attachment/<int:att_id>', methods=['GET'])
+@app.route('/attachment/<id:att_id>', methods=['GET'])
 @login_required
 def download_attachment(att_id):
     att = _owned_attachment(att_id)
@@ -2112,7 +2152,7 @@ def download_attachment(att_id):
     })
 
 
-@app.route('/attachment/<int:att_id>', methods=['DELETE'])
+@app.route('/attachment/<id:att_id>', methods=['DELETE'])
 @login_required
 def delete_attachment(att_id):
     att = _owned_attachment(att_id, with_data=False)
@@ -2162,7 +2202,7 @@ def create_vehicle():
     return jsonify(_vehicle_dict(v)), 201
 
 
-@app.route('/vehicles/<int:vehicle_id>', methods=['PATCH'])
+@app.route('/vehicles/<id:vehicle_id>', methods=['PATCH'])
 @login_required
 def update_vehicle(vehicle_id):
     v = Vehicle.query.filter_by(id=vehicle_id, user_id=current_user.id).first()
@@ -2187,7 +2227,7 @@ def update_vehicle(vehicle_id):
     return jsonify(_vehicle_dict(v))
 
 
-@app.route('/vehicles/<int:vehicle_id>', methods=['DELETE'])
+@app.route('/vehicles/<id:vehicle_id>', methods=['DELETE'])
 @login_required
 def delete_vehicle(vehicle_id):
     v = Vehicle.query.filter_by(id=vehicle_id, user_id=current_user.id).first()
@@ -2269,7 +2309,7 @@ def create_business():
     return jsonify(_business_dict(b)), 201
 
 
-@app.route('/businesses/<int:business_id>', methods=['PATCH'])
+@app.route('/businesses/<id:business_id>', methods=['PATCH'])
 @login_required
 def update_business(business_id):
     b = Business.query.filter_by(id=business_id, user_id=current_user.id).first()
@@ -2291,7 +2331,7 @@ def update_business(business_id):
     return jsonify(_business_dict(b))
 
 
-@app.route('/businesses/<int:business_id>', methods=['DELETE'])
+@app.route('/businesses/<id:business_id>', methods=['DELETE'])
 @login_required
 def delete_business(business_id):
     b = Business.query.filter_by(id=business_id, user_id=current_user.id).first()
@@ -2383,7 +2423,17 @@ def create_api_key():
     stolen session should not be able to issue itself a credential that
     outlives the session and survives a password change.
     """
-    data = request.get_json(silent=True) or {}
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'error': 'Send a JSON object.'}), 400
+    # Before the password gate, so a malformed request neither reaches the hash
+    # with something that is not a string nor counts against the throttle.
+    error = _api_text(data.get('password') or '', 'Password')
+    if error:
+        return jsonify({'error': error}), 400
+    error = _api_text(data.get('name'), 'Key name')
+    if error:
+        return jsonify({'error': error}), 400
     refused = _check_key_gate(data.get('password') or '')
     if refused:
         message, status = refused
@@ -2424,7 +2474,7 @@ def create_api_key():
     return jsonify({'key': full_key, 'api_key': _api_key_dict(key)})
 
 
-@app.route('/profile/api-keys/<int:key_id>', methods=['DELETE'])
+@app.route('/profile/api-keys/<id:key_id>', methods=['DELETE'])
 @login_required
 def revoke_api_key(key_id):
     """Revoke a key. Takes effect on its next request.
@@ -2825,6 +2875,100 @@ _API_TRIP_FIELDS = {'start_location', 'end_location', 'started_at', 'ended_at',
                     'notes', 'vehicle_id', 'business_id', 'stops', 'miles'}
 
 
+# The largest body any /api/v1 or key-management request may carry. The app-wide
+# limit is sized for photo and receipt uploads (megabytes), which no key route
+# takes; a key has no reason to send more than a few kilobytes of JSON, and
+# every byte over that is either a mistake or an attempt to fill the database.
+API_MAX_BODY_BYTES = 64 * 1024
+
+
+@app.before_request
+def _limit_api_body():
+    if request.path.startswith(('/api/v1/', '/profile/api-keys')):
+        request.max_content_length = API_MAX_BODY_BYTES
+
+
+@app.errorhandler(413)
+def _too_large(_error):
+    if request.path.startswith(('/api/v1/', '/profile/api-keys')):
+        return jsonify({'error': f'Request body too large (limit {API_MAX_BODY_BYTES // 1024} KB).'}), 413
+    return jsonify({'error': 'That file is too large.'}), 413
+
+
+API_MAX_LOCATION = 300     # a street address is well under this
+API_MAX_STOP_LABEL = 200
+API_MAX_PLACE_ID = 300
+API_MAX_TIMESTAMP = 40     # an ISO datetime is 19-32 characters
+
+
+def _unstorable_text(text):
+    """True for text the production database cannot hold.
+
+    Postgres rejects NUL bytes in text columns, and a lone surrogate (which
+    JSON can carry as an escape) cannot be encoded as UTF-8 at all. SQLite,
+    which local development and CI use, accepts both, so neither shows up until
+    it is a 500 in production.
+    """
+    if '\x00' in text:
+        return True
+    try:
+        text.encode('utf-8')
+    except UnicodeEncodeError:
+        return True
+    return False
+
+
+def _api_text(value, name, max_length=None):
+    """An error message for a field that is not safe text, else None.
+
+    Not text at all, containing what the database cannot store, or longer than
+    allowed. None is allowed: absence is each caller's own business.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        return f'{name} must be text.'
+    if _unstorable_text(value):
+        return f'{name} contains characters that cannot be stored.'
+    if max_length is not None and len(value.strip()) > max_length:
+        return f'{name} can be at most {max_length} characters.'
+    return None
+
+
+def _check_api_trip_types(data):
+    """A 422 response for a trip body whose fields are the wrong kind, else None.
+
+    Run before anything reads a field, because the readers call .strip() on
+    whatever arrives and an integer or list there is a 500, not an error the
+    caller can act on.
+    """
+    for name, limit in (('start_location', API_MAX_LOCATION), ('end_location', API_MAX_LOCATION),
+                        ('started_at', API_MAX_TIMESTAMP), ('ended_at', API_MAX_TIMESTAMP),
+                        ('notes', None)):
+        error = _api_text(data.get(name), name, limit)
+        if error:
+            return jsonify({'error': error}), 422
+    stops = data.get('stops')
+    if stops is not None:
+        if not isinstance(stops, list):
+            return jsonify({'error': 'stops must be a list.'}), 422
+        if len(stops) > MAX_STOPS * 3:
+            # Blank entries are dropped later, so some slack is allowed; this
+            # only stops an enormous list being walked at all.
+            return jsonify({'error': f'A trip can have at most {MAX_STOPS} stops.'}), 422
+        for item in stops:
+            if isinstance(item, str):
+                error = _api_text(item, 'a stop', API_MAX_STOP_LABEL)
+            elif isinstance(item, dict):
+                error = (_api_text(item.get('label'), 'a stop label', API_MAX_STOP_LABEL)
+                         or _api_text(item.get('place_id'), 'a stop place_id', API_MAX_PLACE_ID))
+            else:
+                error = 'each stop must be text or an object with a label.'
+            if error:
+                return jsonify({'error': error}), 422
+    return None
+
+
 def _unknown_trip_fields(data):
     """A 422 response naming any field the trip API does not know, else None."""
     unknown = set(data) - _API_TRIP_FIELDS
@@ -2879,7 +3023,7 @@ def api_create_trip():
     if not isinstance(data, dict):
         return jsonify({'error': 'Send a JSON object with Content-Type: application/json.'}), 422
 
-    refused = _unknown_trip_fields(data)
+    refused = _unknown_trip_fields(data) or _check_api_trip_types(data)
     if refused:
         return refused
 
@@ -2912,6 +3056,21 @@ def api_create_trip():
         return jsonify({'error': str(exc)}), 422
 
     user = g.api_user
+
+    # A ceiling on how much one key can add in a day, separate from the request
+    # rate: at 60 requests per window a runaway loop could still log thousands of
+    # distinct trips, and the home page loads the whole history. Real use is a
+    # handful a day, so the cap is far above any honest need and exists only to
+    # stop a loop from burying an account.
+    since = _utcnow() - timedelta(hours=24)
+    logged_today = Trip.query.filter(Trip.created_by_key_id == g.api_key.id,
+                                     Trip.timestamp >= since).count()
+    if logged_today >= API_MAX_TRIPS_PER_DAY:
+        return jsonify({
+            'error': f'This key has logged {API_MAX_TRIPS_PER_DAY} trips in the last 24 '
+                     'hours, which is the most one key may add per day. If this was '
+                     'not expected, revoke the key.'
+        }), 429
 
     # Before the vehicle lookup and the billable distance measurement, so a
     # trip that is about to be refused costs nothing. The same two rules as the
@@ -2999,6 +3158,8 @@ def api_create_trip():
     }), 201
 
 
+API_MAX_TRIPS_PER_DAY = 300
+
 API_PAGE_DEFAULT = 50
 API_PAGE_MAX = 200
 
@@ -3040,7 +3201,7 @@ def api_list_trips():
     })
 
 
-@app.route('/api/v1/trips/<int:trip_id>', methods=['GET'])
+@app.route('/api/v1/trips/<id:trip_id>', methods=['GET'])
 @api_key_required('trips:read')
 def api_get_trip(trip_id):
     trip = Trip.query.filter_by(id=trip_id, user_id=g.api_user.id).first()
@@ -3049,7 +3210,7 @@ def api_get_trip(trip_id):
     return jsonify(_api_trip_dict(trip))
 
 
-@app.route('/api/v1/trips/<int:trip_id>', methods=['PATCH'])
+@app.route('/api/v1/trips/<id:trip_id>', methods=['PATCH'])
 @api_key_required('trips:update')
 def api_update_trip(trip_id):
     """Change some fields of one trip; anything not sent is left alone.
@@ -3067,15 +3228,11 @@ def api_update_trip(trip_id):
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
         return jsonify({'error': 'Send a JSON object with Content-Type: application/json.'}), 422
-    refused = _unknown_trip_fields(data)
+    refused = _unknown_trip_fields(data) or _check_api_trip_types(data)
     if refused:
         return refused
     if not data:
         return jsonify({'error': 'Send at least one field to change.'}), 422
-
-    for name in ('start_location', 'end_location', 'notes'):
-        if name in data and data[name] is not None and not isinstance(data[name], str):
-            return jsonify({'error': f'{name} must be text.'}), 422
 
     start, end = trip.start_location, trip.end_location
     if 'start_location' in data:
@@ -3186,16 +3343,21 @@ def api_update_trip(trip_id):
     db.session.commit()
 
     result = _api_trip_dict(trip)
-    result['warning'] = (check_trip_feasibility(trip.start_time, trip.end_time,
-                                                distance_miles, duration_seconds,
-                                                stop_count=len(stops),
-                                                trip_date=trip.trip_date,
-                                                end_date=trip.end_date)
-                         if distance_miles is not None else None)
+    if distance_miles is not None:
+        result['warning'] = check_trip_feasibility(
+            trip.start_time, trip.end_time, distance_miles, duration_seconds,
+            stop_count=len(stops), trip_date=trip.trip_date, end_date=trip.end_date)
+    elif route_changed:
+        # Said, not left as a silent null: the mileage belonged to the old route,
+        # so it was cleared, and a caller reading only the status would not know.
+        result['warning'] = ('The new route could not be measured, so the trip '
+                             'now has no mileage. Send "miles" or edit it again.')
+    else:
+        result['warning'] = None
     return jsonify(result)
 
 
-@app.route('/api/v1/trips/<int:trip_id>', methods=['DELETE'])
+@app.route('/api/v1/trips/<id:trip_id>', methods=['DELETE'])
 @api_key_required('trips:delete')
 def api_delete_trip(trip_id):
     """Delete one trip, and its attachments, permanently.
@@ -3210,7 +3372,7 @@ def api_delete_trip(trip_id):
     TripAttachment.query.filter_by(trip_id=trip.id).delete()
     db.session.delete(trip)
     db.session.commit()
-    app.logger.info('API key %s (%s) deleted trip %s for user %s',
+    app.logger.warning('API key %s (%s) deleted trip %s for user %s',
                     g.api_key.id, g.api_key.public_id, trip_id, g.api_user.id)
     return jsonify({'deleted': trip_id})
 
