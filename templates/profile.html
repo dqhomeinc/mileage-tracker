@@ -783,7 +783,11 @@ async function createApiKey() {
 
 async function revokeApiKey(id, btn) {
   const key = apiKeys.find(k => k.id === id);
-  if (!confirm(`Revoke "${key ? key.name : 'this key'}"?\n\nAnything using it stops working on its next request. This cannot be undone.`)) return;
+  if (!await confirmDialog({
+    title: `Revoke "${key ? key.name : 'this key'}"?`,
+    message: 'Anything using it stops working on its next request. This cannot be undone.',
+    confirmLabel: 'Revoke', icon: 'fa-ban',
+  })) return;
   setApiKeyMsg('');
   btn.disabled = true;
   btn.textContent = 'Revoking…';
