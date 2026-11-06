@@ -1407,10 +1407,20 @@ def _as_id(value):
     if value is None or isinstance(value, bool):
         return None
     if isinstance(value, int):
-        return value
-    if isinstance(value, str) and value.strip().lstrip('-').isdigit():
-        return int(value.strip())
+        return value if abs(value) <= _MAX_ID else None
+    # ASCII digits only, and bounded. str.isdigit() is true for characters such
+    # as "\u00b2" that int() then refuses, and int() itself raises on a string of
+    # thousands of digits -- each reached the client as a 500. The bound is the
+    # database's: an id beyond a signed 64-bit integer overflows the driver
+    # rather than simply matching nothing.
+    if isinstance(value, str) and _ID_TEXT.fullmatch(value.strip()):
+        number = int(value.strip())
+        return number if abs(number) <= _MAX_ID else None
     return None
+
+
+_ID_TEXT = re.compile(r'-?[0-9]{1,19}')
+_MAX_ID = 2**63 - 1
 
 
 MAX_NOTE_LENGTH = 500
