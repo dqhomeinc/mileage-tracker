@@ -14,17 +14,7 @@ from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader
 
-TEMPLATES_WITH_CONTEXT = {
-    'register.html': {},
-    'login.html': {},
-    'forgot_password.html': {},
-    'reset_password.html': {'token': 'dummy-token'},
-    'index.html': {'username': 'tester', 'photo_data': None,
-                   'maps_browser_key': 'test-browser-key'},
-    'vehicles.html': {'username': 'tester', 'photo_data': None},
-    'businesses.html': {'username': 'tester', 'photo_data': None},
-    'profile.html': {'username': 'tester', 'email': 't@example.com', 'photo_data': None},
-}
+from template_context import TEMPLATES_WITH_CONTEXT
 
 SCRIPT_RE = re.compile(r'<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>', re.DOTALL | re.IGNORECASE)
 
@@ -38,7 +28,13 @@ checked = 0
 
 with tempfile.TemporaryDirectory() as tmpdir:
     for name, context in TEMPLATES_WITH_CONTEXT.items():
-        html = env.get_template(name).render(**context, show_time_toggle=True)
+        try:
+            html = env.get_template(name).render(**context, show_time_toggle=True)
+        except Exception as e:  # noqa: BLE001 — reporting, not handling
+            # A render failure here would otherwise abort the script with a
+            # traceback and leave every later template unchecked.
+            failures.append(f'{name}: could not render: {type(e).__name__}: {e}')
+            continue
         for i, script in enumerate(SCRIPT_RE.findall(html)):
             if not script.strip():
                 continue
