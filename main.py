@@ -263,10 +263,10 @@ class ApiKey(db.Model):
     # here costs no extra query and nothing accumulates to prune.
     window_started_at = db.Column(db.DateTime, nullable=True)
     window_count = db.Column(db.Integer, nullable=True)
-    # Comma-separated names from API_SCOPES. Fixed at creation and not editable
-    # afterwards: widening a key's reach without issuing a new secret would let
-    # a stolen session quietly upgrade a credential someone else already holds.
-    # Minting is cheap, so the way to change what a key can do is to replace it.
+    # Comma-separated names from API_SCOPES. Changed only from a signed-in
+    # session (update_api_key_scopes), never by a key: narrowing is free, and
+    # widening asks for the password because the key being widened may already
+    # be in another system's hands.
     scopes = db.Column(db.String(200), nullable=False, default='')
 
     @property
@@ -2366,6 +2366,20 @@ def profile():
     )
 
 
+def _requested_scopes(data):
+    """(scopes in registry order, None) from a request body, or (None, message)."""
+    requested = data.get('scopes')
+    if not isinstance(requested, list) or not all(isinstance(x, str) for x in requested):
+        return None, 'Choose what this key is allowed to do.'
+    unknown = sorted(set(requested) - set(API_SCOPES))
+    if unknown:
+        return None, f'Unknown permission: {unknown[0]}.'
+    granted = parse_scopes(','.join(requested))
+    if not granted:
+        return None, 'Choose at least one thing this key is allowed to do.'
+    return granted, None
+
+
 @app.route('/profile/api-keys', methods=['POST'])
 @login_required
 def create_api_key():
@@ -2388,15 +2402,9 @@ def create_api_key():
 
     # Required, not defaulted. A caller that forgets to say what the key may do
     # should be told so, not handed everything.
-    requested = data.get('scopes')
-    if not isinstance(requested, list) or not all(isinstance(x, str) for x in requested):
-        return jsonify({'error': 'Choose what this key is allowed to do.'}), 400
-    unknown = sorted(set(requested) - set(API_SCOPES))
-    if unknown:
-        return jsonify({'error': f'Unknown permission: {unknown[0]}.'}), 400
-    granted = parse_scopes(','.join(requested))
-    if not granted:
-        return jsonify({'error': 'Choose at least one thing this key is allowed to do.'}), 400
+    granted, scope_error = _requested_scopes(data)
+    if scope_error:
+        return jsonify({'error': scope_error}), 400
 
     active = ApiKey.query.filter_by(user_id=current_user.id, revoked_at=None).count()
     if active >= MAX_ACTIVE_API_KEYS:
@@ -2414,6 +2422,52 @@ def create_api_key():
     # this response cannot be reproduced -- losing it means revoking and
     # minting again, which is why minting is cheap.
     return jsonify({'key': full_key, 'api_key': _api_key_dict(key)})
+
+
+@app.route('/profile/api-keys/<int:key_id>', methods=['PATCH'])
+@login_required
+def update_api_key_scopes(key_id):
+    """Change what an existing key is allowed to do.
+
+    Only ever reachable from a signed-in browser session. There is no API route
+    for it and no scope that grants it: a key must never be able to change
+    keys, its own or another's, because that would let any key promote itself
+    to everything. The routes here use @login_required, which a key does not
+    satisfy -- a key authenticates /api/v1 requests and never establishes a
+    session.
+
+    The two directions are not symmetrical. Taking permissions away only makes
+    the key safer, so it is immediate and costs nothing -- the same reasoning as
+    revoking, which also has no gate. Adding permissions is the one thing that
+    could turn a stolen session into lasting reach, since the key it widens may
+    already be in another system's hands, so it asks for the password as
+    creating a key does.
+    """
+    key = ApiKey.query.filter_by(id=key_id, user_id=current_user.id).first()
+    if not key:
+        return jsonify({'error': 'Key not found.'}), 404
+    if not key.active:
+        return jsonify({'error': 'A revoked key cannot be changed.'}), 409
+
+    data = request.get_json(silent=True) or {}
+    granted, scope_error = _requested_scopes(data)
+    if scope_error:
+        return jsonify({'error': scope_error}), 400
+
+    # Validated first, so a malformed request is not charged against the
+    # password throttle.
+    widening = set(granted) - set(key.scope_list)
+    if widening:
+        refused = _check_key_gate(data.get('password') or '')
+        if refused:
+            message, status = refused
+            return jsonify({'error': message}), status
+
+    key.scopes = ','.join(granted)
+    db.session.commit()
+    app.logger.info('User %s changed permissions of API key %s (%s) to %s',
+                    current_user.id, key.id, key.public_id, key.scopes)
+    return jsonify({'api_key': _api_key_dict(key)})
 
 
 @app.route('/profile/api-keys/<int:key_id>', methods=['DELETE'])
