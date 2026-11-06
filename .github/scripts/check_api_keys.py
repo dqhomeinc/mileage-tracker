@@ -266,7 +266,7 @@ for bad, label in (('abc', 'a non-numeric vehicle_id'), ('1.5', 'a fractional id
     expect(f'{label} attaches no vehicle', field(resp, 'vehicle'), None)
 
 for bad_id in ('\u00b2', '9' * 5000, 2 ** 70):
-    r = anon.post('/api/v1/trips', headers=auth(JANE_KEY), json={**BODY, 'business_id': bad_id})
+    r = anon.post('/api/v1/trips', headers=auth(JANE_KEY), json=body({'business_id': bad_id}))
     expect(f'a junk business_id {str(bad_id)[:8]!r} does not crash', r.status_code, 201)
 # Plain ids, including padded ones, still resolve.
 expect('an ordinary id still resolves', (main._as_id(7), main._as_id(' 7 '), main._as_id('-3')), (7, 7, -3))
@@ -468,8 +468,8 @@ def scoped_key(*scopes):
 
 ROUTES = {
     'trips:create':    lambda c, k: c.post('/api/v1/trips', headers=auth(k),
-                                           json=body({'started_at': '2026-11-01T08:00',
-                                                 'ended_at': '2026-11-01T08:30'})),
+                                           json=body({'started_at': '2026-06-01T08:00',
+                                                 'ended_at': '2026-06-01T08:30'})),
     'vehicles:read':   lambda c, k: c.get('/api/v1/vehicles', headers=auth(k)),
     'businesses:read': lambda c, k: c.get('/api/v1/businesses', headers=auth(k)),
 }
