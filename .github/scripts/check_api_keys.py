@@ -699,6 +699,10 @@ with patch.object(main, 'calculate_driving_miles',
 with patch.object(main, 'calculate_driving_miles', side_effect=RuntimeError('no route')):
     r = edit(t1, {'end_location': 'E8'})
     expect('an unmeasurable new route leaves no stale mileage', field(r, 'miles'), None)
+    expect('and says so, rather than leaving a silent null',
+           'no mileage' in (field(r, 'warning') or ''), True)
+    expect('a notes-only edit carries no such warning',
+           field(edit(t1, {'notes': 'again'}), 'warning'), None)
     r = edit(t1, {'end_location': 'E7', 'miles': 12.5})
     expect('the supplied mileage is only the fallback', field(r, 'miles'), 12.5)
     expect('a bad fallback is refused', edit(t1, {'end_location': 'E6', 'miles': -1}).status_code, 422)
