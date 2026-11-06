@@ -3406,6 +3406,8 @@ def _api_text_field(data, name, max_length, required=False):
     value = (value or '').strip() or None
     if required and not value:
         return None, f'{name} cannot be blank.'
+    if value and _unstorable_text(value):
+        return None, f'{name} contains characters that cannot be stored.'
     if value and len(value) > max_length:
         return None, f'{name} can be at most {max_length} characters.'
     return value, None
@@ -3455,7 +3457,7 @@ def api_create_vehicle():
     return jsonify(_vehicle_dict(v, owner=user)), 201
 
 
-@app.route('/api/v1/vehicles/<int:vehicle_id>', methods=['PATCH'])
+@app.route('/api/v1/vehicles/<id:vehicle_id>', methods=['PATCH'])
 @api_key_required('vehicles:write')
 def api_update_vehicle(vehicle_id):
     user = g.api_user
@@ -3486,7 +3488,7 @@ def api_update_vehicle(vehicle_id):
     return jsonify(_vehicle_dict(v, owner=user))
 
 
-@app.route('/api/v1/vehicles/<int:vehicle_id>', methods=['DELETE'])
+@app.route('/api/v1/vehicles/<id:vehicle_id>', methods=['DELETE'])
 @api_key_required('vehicles:write')
 def api_delete_vehicle(vehicle_id):
     """Delete a vehicle. Trips that used it are kept and simply lose the link,
@@ -3529,7 +3531,7 @@ def api_create_business():
     return jsonify(_business_dict(b, owner=user)), 201
 
 
-@app.route('/api/v1/businesses/<int:business_id>', methods=['PATCH'])
+@app.route('/api/v1/businesses/<id:business_id>', methods=['PATCH'])
 @api_key_required('businesses:write')
 def api_update_business(business_id):
     user = g.api_user
@@ -3555,7 +3557,7 @@ def api_update_business(business_id):
     return jsonify(_business_dict(b, owner=user))
 
 
-@app.route('/api/v1/businesses/<int:business_id>', methods=['DELETE'])
+@app.route('/api/v1/businesses/<id:business_id>', methods=['DELETE'])
 @api_key_required('businesses:write')
 def api_delete_business(business_id):
     """As deleting a vehicle: trips are kept and lose the link."""
