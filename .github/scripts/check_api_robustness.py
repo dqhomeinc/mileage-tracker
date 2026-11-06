@@ -161,14 +161,35 @@ def make_business():
         return b.id
 
 
+def free_key_slots():
+    """Retire every key but the one under test.
+
+    The fuzzing creates a key whenever a hostile body happens to be valid, and an
+    account may hold only so many active ones. Once the limit is reached, minting
+    a decoy fails -- and a route aimed at a decoy that does not exist answers 404
+    before it ever reads the body, so the handler goes untested while the check
+    still passes.
+    """
+    with main.app.app_context():
+        for k in main.ApiKey.query.filter_by(user_id=USER_ID, revoked_at=None).all():
+            if main.parse_api_key(KEY)[0] != k.public_id:
+                k.revoked_at = main._utcnow()
+        main.db.session.commit()
+
+
 def make_decoy_key():
     """A key to aim the key-management routes at, never the one under test --
     revoking that one mid-run would turn every later request into a 401."""
-    resp = browser.post('/profile/api-keys', json={
-        'name': 'decoy', 'password': PASSWORD, 'scopes': ['trips:create']})
-    # If minting is refused (the account is at its key limit) aim at an id that
-    # does not exist rather than at 1, which is the key under test.
-    return (resp.get_json() or {}).get('api_key', {}).get('id', 10 ** 9)
+    for attempt in range(2):
+        resp = browser.post('/profile/api-keys', json={
+            'name': 'decoy', 'password': PASSWORD, 'scopes': ['trips:create']})
+        found = (resp.get_json() or {}).get('api_key', {}).get('id')
+        if found:
+            return found
+        free_key_slots()
+    failures.append('could not mint a decoy key to aim the key routes at, so those '
+                    'handlers would go untested')
+    return 10 ** 9
 
 
 def fill(rule, huge=False):
@@ -332,11 +353,7 @@ if cap:
         main.db.session.commit()
     # The fuzzing above minted keys of its own; clear them so the account is
     # under its active-key limit and the flood key can be created.
-    with main.app.app_context():
-        for k in main.ApiKey.query.filter_by(user_id=USER_ID, revoked_at=None).all():
-            if main.parse_api_key(KEY)[0] != k.public_id:
-                k.revoked_at = main._utcnow()
-        main.db.session.commit()
+    free_key_slots()
     flood = browser.post('/profile/api-keys', json={
         'name': 'flood', 'password': PASSWORD, 'scopes': ['trips:create']})
     if not (flood.get_json() or {}).get('key'):

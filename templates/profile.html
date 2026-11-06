@@ -181,6 +181,16 @@
       font-size: .7rem; font-family: monospace; color: var(--primary);
       background: #EEF2FF; border-radius: 6px; padding: 2px 7px;
     }
+    .key-actions-col { display: flex; flex-direction: column; gap: 6px; align-items: flex-end; }
+    .key-edit {
+      background: none; border: 1.5px solid var(--border); border-radius: 8px;
+      padding: 5px 12px; font-size: .78rem; font-weight: 600; cursor: pointer;
+      color: var(--muted); font-family: 'Inter', sans-serif;
+    }
+    .key-edit:hover { border-color: var(--primary); color: var(--primary); }
+    .key-row { flex-wrap: wrap; }
+    .key-editor { flex-basis: 100%; display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+    .key-editor-actions { display: flex; gap: 10px; justify-content: flex-end; }
     .key-empty { font-size: .84rem; color: var(--muted); margin-bottom: 16px; }
     /* The one-time reveal. Deliberately loud: it is the only time the key is
        ever shown, and a user who closes the page without copying it has to
@@ -300,8 +310,9 @@
     <p class="key-note">
       An API key lets a script or an assistant act for you
       <strong>without your password</strong>. You choose what each key may do
-      when you create it, and that can't be changed afterwards — to change a
-      key's permissions, revoke it and create a new one. No key can reach your
+      and can change it later with Permissions. Removing a permission is
+      immediate; adding one asks for your password. A key can never change
+      keys, itself included. No key can reach your
       account details, change your password, or sign in to this site.
       Revoke one any time; nothing else about your account changes.
     </p>
@@ -642,6 +653,8 @@ async function copyLoggingKey() {
 let apiKeys = {{ api_keys|tojson }};
 const API_BASE = {{ api_base_url|tojson }};
 let lastMintedKey = null;
+let editingKeyId = null;
+const API_SCOPES = {{ api_scopes|tojson }};
 
 function setApiKeyMsg(text, kind) {
   const el = document.getElementById('apiKeyMsg');
@@ -662,8 +675,29 @@ function renderApiKeys() {
       k.last_used_at ? `last used ${escHtml(k.last_used_at)}` : 'never used',
     ].filter(Boolean).join(' · ');
     const action = k.active
-      ? `<button class="key-revoke" onclick="revokeApiKey(${k.id}, this)">Revoke</button>`
+      ? `<div class="key-actions-col">
+           <button class="key-edit" onclick="editApiKey(${k.id})">Permissions</button>
+           <button class="key-revoke" onclick="revokeApiKey(${k.id}, this)">Revoke</button>
+         </div>`
       : `<span class="key-revoked-tag">Revoked</span>`;
+    const editor = (k.active && editingKeyId === k.id) ? `
+      <div class="key-editor" id="keyEditor">
+        ${Object.entries(API_SCOPES).map(([name, label]) => `
+          <label class="scope-option">
+            <input type="checkbox" name="editScope" value="${escHtml(name)}"
+                   ${(k.scopes || []).includes(name) ? 'checked' : ''}
+                   onchange="updateEditHint(${k.id})">
+            <span><strong>${escHtml(label)}</strong><code>${escHtml(name)}</code></span>
+          </label>`).join('')}
+        <div class="field d-none" id="editPwField">
+          <label for="editPw">Adding permissions needs your password</label>
+          <input type="password" id="editPw" placeholder="••••••••" autocomplete="current-password">
+        </div>
+        <div class="key-editor-actions">
+          <button class="btn-ghost" type="button" onclick="cancelEditApiKey()">Cancel</button>
+          <button class="btn-save" type="button" id="saveScopesBtn" onclick="saveApiKeyScopes(${k.id}, this)">Save permissions</button>
+        </div>
+      </div>` : '';
     return `<li class="key-row ${k.active ? '' : 'revoked'}">
       <div class="key-row-main">
         <div class="key-row-name">${escHtml(k.name)}</div>
@@ -672,6 +706,7 @@ function renderApiKeys() {
         <div class="key-scopes">${(k.scopes || []).map(sc => `<span class="key-scope">${escHtml(sc)}</span>`).join('')}</div>
       </div>
       ${action}
+      ${editor}
     </li>`;
   }).join('');
 }
@@ -785,6 +820,64 @@ async function createApiKey() {
   } finally {
     btn.disabled = false;
     btn.textContent = original;
+  }
+}
+
+function editApiKey(id) {
+  editingKeyId = id;
+  setApiKeyMsg('');
+  renderApiKeys();
+}
+
+function cancelEditApiKey() {
+  editingKeyId = null;
+  renderApiKeys();
+}
+
+function pickedScopes() {
+  return [...document.querySelectorAll('input[name="editScope"]:checked')].map(el => el.value);
+}
+
+// Only asks for the password once the change would add something, so removing
+// permissions stays a single click.
+function updateEditHint(id) {
+  const key = apiKeys.find(k => k.id === id);
+  const adds = pickedScopes().some(sc => !(key.scopes || []).includes(sc));
+  document.getElementById('editPwField').classList.toggle('d-none', !adds);
+}
+
+async function saveApiKeyScopes(id, btn) {
+  const key = apiKeys.find(k => k.id === id);
+  const scopes = pickedScopes();
+  setApiKeyMsg('');
+  if (!scopes.length) {
+    setApiKeyMsg('A key needs at least one permission. Revoke it instead to switch it off.', 'error');
+    return;
+  }
+  const adds = scopes.some(sc => !(key.scopes || []).includes(sc));
+  const body = { scopes };
+  if (adds) {
+    body.password = document.getElementById('editPw').value;
+    if (!body.password) { setApiKeyMsg('Enter your password to add permissions.', 'error'); return; }
+  }
+  btn.disabled = true;
+  try {
+    const resp = await fetch(`/profile/api-keys/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const data = await resp.json();
+    if (!resp.ok) { setApiKeyMsg(data.error || 'Could not change that key.', 'error'); return; }
+    const i = apiKeys.findIndex(k => k.id === id);
+    if (i >= 0) apiKeys[i] = data.api_key;
+    editingKeyId = null;
+    renderApiKeys();
+    setApiKeyMsg('Permissions updated.', 'success');
+  } catch {
+    setApiKeyMsg('Network error. Could not change that key.', 'error');
+  } finally {
+    btn.disabled = false;
   }
 }
 

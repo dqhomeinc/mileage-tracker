@@ -928,6 +928,94 @@ expect('vehicles:write does not allow businesses',
 expect('the write scopes are opt-in at creation',
        set(main.API_DEFAULT_SCOPES) & {'vehicles:write', 'businesses:write'}, set())
 
+# ── Changing a key's permissions ────────────────────────────────────────
+def key_row(public_id):
+    with main.app.app_context():
+        return main.ApiKey.query.filter_by(public_id=public_id).first().scope_list
+
+
+def edit_scopes(client, key_id, scopes, password=None):
+    body = {'scopes': scopes}
+    if password is not None:
+        body['password'] = password
+    return client.patch(f'/profile/api-keys/{key_id}', json=body)
+
+
+minted = mint(jane_client, name='editable', scopes=['trips:create', 'vehicles:read', 'trips:delete'])
+EDIT_ID = field(minted, 'api_key', {}).get('id')
+EDIT_KEY = field(minted, 'key')
+EDIT_PUB = main.parse_api_key(EDIT_KEY)[0]
+
+# Narrowing is immediate and needs no password.
+r = edit_scopes(jane_client, EDIT_ID, ['trips:create', 'vehicles:read'])
+expect('removing a permission needs no password', r.status_code, 200)
+expect('and is reflected', field(r, 'api_key', {}).get('scopes'), ['trips:create', 'vehicles:read'])
+expect('and takes effect on the next request',
+       anon.delete(f'/api/v1/trips/{make_trip()}', headers=auth(EDIT_KEY)).status_code, 403)
+expect('what remains still works',
+       anon.get('/api/v1/vehicles', headers=auth(EDIT_KEY)).status_code, 200)
+expect('saving the same set is a no-op that needs no password',
+       edit_scopes(jane_client, EDIT_ID, ['vehicles:read', 'trips:create']).status_code, 200)
+
+# Widening is behind the password.
+for label, pw in (('no password', None), ('a blank password', ''), ('the wrong password', 'Wrongpass123!')):
+    r = edit_scopes(jane_client, EDIT_ID, ['trips:create', 'vehicles:read', 'trips:delete'], pw)
+    expect(f'adding a permission with {label} is refused', r.status_code, 403)
+expect('and the key was not widened', key_row(EDIT_PUB), ['trips:create', 'vehicles:read'])
+expect('the refused widening did not take effect',
+       anon.delete(f'/api/v1/trips/{make_trip()}', headers=auth(EDIT_KEY)).status_code, 403)
+r = edit_scopes(jane_client, EDIT_ID, ['trips:create', 'vehicles:read', 'trips:delete'], PASSWORD)
+expect('adding with the right password works', r.status_code, 200)
+expect('and takes effect',
+       anon.delete(f'/api/v1/trips/{make_trip()}', headers=auth(EDIT_KEY)).status_code, 200)
+# Swapping one for another adds one, so it is widening too.
+expect('swapping a permission counts as adding one',
+       edit_scopes(jane_client, EDIT_ID, ['trips:create', 'vehicles:read', 'trips:update']).status_code, 403)
+
+# The same validation as creating.
+for label, scopes in (('none', []), ('an unknown name', ['admin']), ('a string', 'trips:create'),
+                      ('a non-string entry', [1])):
+    expect(f'setting {label} is refused',
+           edit_scopes(jane_client, EDIT_ID, scopes, PASSWORD).status_code, 400)
+expect('a refused change left the key as it was',
+       key_row(EDIT_PUB), ['trips:create', 'trips:delete', 'vehicles:read'])
+
+# Ownership and state.
+expect('another account cannot change my key',
+       edit_scopes(bob_client, EDIT_ID, ['trips:create'], PASSWORD).status_code, 404)
+expect('and it is unchanged', key_row(EDIT_PUB), ['trips:create', 'trips:delete', 'vehicles:read'])
+expect('an unknown key is a 404', edit_scopes(jane_client, 999999, ['trips:create']).status_code, 404)
+expect('an anonymous caller cannot change a key',
+       main.app.test_client().patch(f'/profile/api-keys/{EDIT_ID}',
+                                    json={'scopes': ['trips:create']}).status_code in (302, 401), True)
+jane_client.delete(f'/profile/api-keys/{EDIT_ID}')
+expect('a revoked key cannot be changed',
+       edit_scopes(jane_client, EDIT_ID, ['trips:create'], PASSWORD).status_code, 409)
+
+# A key can never change keys. Every route that creates, changes or revokes one
+# is session-only, and holding every permission there is must not open them.
+god = scoped_key(*main.API_SCOPES)
+with main.app.app_context():
+    god_row = main.ApiKey.query.filter_by(public_id=main.parse_api_key(god)[0]).first()
+    GOD_ID, GOD_PUB = god_row.id, god_row.public_id
+    before = main.ApiKey.query.filter_by(user_id=JANE_ID, revoked_at=None).count()
+for method, path, body in (
+        ('POST', '/profile/api-keys', {'name': 'sneaky', 'password': PASSWORD, 'scopes': ['trips:create']}),
+        ('PATCH', f'/profile/api-keys/{GOD_ID}', {'scopes': list(main.API_SCOPES), 'password': PASSWORD}),
+        ('DELETE', f'/profile/api-keys/{GOD_ID}', None)):
+    resp = anon.open(path, method=method, json=body, headers=auth(god))
+    expect(f'a key with every permission cannot {method} {path}',
+           resp.status_code in (302, 401), True)
+with main.app.app_context():
+    expect('no key was created or revoked by it',
+           main.ApiKey.query.filter_by(user_id=JANE_ID, revoked_at=None).count(), before)
+expect('and it still has only what it was given', key_row(GOD_PUB), list(main.API_SCOPES))
+expect('and no scope exists that could grant it',
+       [n for n in main.API_SCOPES if 'key' in n.lower()], [])
+# Nothing under /api/v1 touches keys either.
+paths = [str(r) for r in main.app.url_map.iter_rules() if str(r).startswith('/api/v1')]
+expect('no /api/v1 route is about keys', [p for p in paths if 'key' in p.lower()], [])
+
 measure_patch.stop()
 os.unlink(_db.name)
 
