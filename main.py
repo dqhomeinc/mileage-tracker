@@ -196,7 +196,9 @@ API_SCOPES = {
     'trips:update':    'Edit trips you have already logged',
     'trips:delete':    'Delete trips permanently',
     'vehicles:read':   'Read your vehicles',
+    'vehicles:write':  'Add, rename and delete your vehicles',
     'businesses:read': 'Read your businesses',
+    'businesses:write': 'Add, rename and delete your businesses',
 }
 
 # Ticked when the create form first opens. Only what an agent needs to log
@@ -3215,6 +3217,188 @@ def api_list_vehicles():
     vs = (Vehicle.query.filter_by(user_id=g.api_user.id)
           .order_by(Vehicle.name).all())
     return jsonify([_vehicle_dict(v, owner=g.api_user) for v in vs])
+
+
+def _api_text_field(data, name, max_length, required=False):
+    """(value, error) for one optional or required text field of a JSON body.
+
+    Over-length is refused, not truncated: unlike a note, a name is what the
+    record is called, and a silently shortened one would no longer match what
+    the caller sent. None and blank both mean "no value".
+    """
+    if name not in data:
+        return None, None
+    value = data[name]
+    if value is not None and not isinstance(value, str):
+        return None, f'{name} must be text.'
+    value = (value or '').strip() or None
+    if required and not value:
+        return None, f'{name} cannot be blank.'
+    if value and len(value) > max_length:
+        return None, f'{name} can be at most {max_length} characters.'
+    return value, None
+
+
+def _json_object_or_422():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return None, (jsonify({'error': 'Send a JSON object with Content-Type: application/json.'}), 422)
+    return data, None
+
+
+_API_VEHICLE_FIELDS = {'name': 100, 'year': 4, 'make': 60, 'model': 60}
+
+
+def _check_api_fields(data, allowed):
+    unknown = set(data) - set(allowed)
+    if unknown:
+        return (jsonify({'error': f'Unknown fields: {", ".join(sorted(unknown))}. '
+                                  f'Expected: {", ".join(sorted(allowed))}.'}), 422)
+    return None
+
+
+@app.route('/api/v1/vehicles', methods=['POST'])
+@api_key_required('vehicles:write')
+def api_create_vehicle():
+    data, bad = _json_object_or_422()
+    if bad:
+        return bad
+    bad = _check_api_fields(data, _API_VEHICLE_FIELDS)
+    if bad:
+        return bad
+    values = {}
+    for name, limit in _API_VEHICLE_FIELDS.items():
+        values[name], error = _api_text_field(data, name, limit, required=(name == 'name'))
+        if error:
+            return jsonify({'error': error}), 422
+    if 'name' not in data:
+        return jsonify({'error': 'name is required.'}), 422
+    user = g.api_user
+    if Vehicle.query.filter(Vehicle.user_id == user.id,
+                            db.func.lower(Vehicle.name) == values['name'].lower()).first():
+        return jsonify({'error': f'You already have a vehicle named "{values["name"]}".'}), 409
+    v = Vehicle(user_id=user.id, **values)
+    db.session.add(v)
+    db.session.commit()
+    return jsonify(_vehicle_dict(v, owner=user)), 201
+
+
+@app.route('/api/v1/vehicles/<int:vehicle_id>', methods=['PATCH'])
+@api_key_required('vehicles:write')
+def api_update_vehicle(vehicle_id):
+    user = g.api_user
+    v = Vehicle.query.filter_by(id=vehicle_id, user_id=user.id).first()
+    if not v:
+        return jsonify({'error': 'Vehicle not found.'}), 404
+    data, bad = _json_object_or_422()
+    if bad:
+        return bad
+    bad = _check_api_fields(data, _API_VEHICLE_FIELDS)
+    if bad:
+        return bad
+    if not data:
+        return jsonify({'error': 'Send at least one field to change.'}), 422
+    values = {}
+    for name, limit in _API_VEHICLE_FIELDS.items():
+        if name in data:
+            values[name], error = _api_text_field(data, name, limit, required=(name == 'name'))
+            if error:
+                return jsonify({'error': error}), 422
+    if 'name' in values and Vehicle.query.filter(
+            Vehicle.user_id == user.id, Vehicle.id != v.id,
+            db.func.lower(Vehicle.name) == values['name'].lower()).first():
+        return jsonify({'error': f'You already have a vehicle named "{values["name"]}".'}), 409
+    for name, value in values.items():
+        setattr(v, name, value)
+    db.session.commit()
+    return jsonify(_vehicle_dict(v, owner=user))
+
+
+@app.route('/api/v1/vehicles/<int:vehicle_id>', methods=['DELETE'])
+@api_key_required('vehicles:write')
+def api_delete_vehicle(vehicle_id):
+    """Delete a vehicle. Trips that used it are kept and simply lose the link,
+    exactly as when it is removed in the browser."""
+    user = g.api_user
+    v = Vehicle.query.filter_by(id=vehicle_id, user_id=user.id).first()
+    if not v:
+        return jsonify({'error': 'Vehicle not found.'}), 404
+    Trip.query.filter_by(vehicle_id=v.id).update({'vehicle_id': None})
+    if user.default_vehicle_id == v.id:
+        user.default_vehicle_id = None
+    db.session.delete(v)
+    db.session.commit()
+    app.logger.info('API key %s (%s) deleted vehicle %s for user %s',
+                    g.api_key.id, g.api_key.public_id, vehicle_id, user.id)
+    return jsonify({'deleted': vehicle_id})
+
+
+@app.route('/api/v1/businesses', methods=['POST'])
+@api_key_required('businesses:write')
+def api_create_business():
+    data, bad = _json_object_or_422()
+    if bad:
+        return bad
+    bad = _check_api_fields(data, {'name'})
+    if bad:
+        return bad
+    if 'name' not in data:
+        return jsonify({'error': 'name is required.'}), 422
+    name, error = _api_text_field(data, 'name', 100, required=True)
+    if error:
+        return jsonify({'error': error}), 422
+    user = g.api_user
+    if Business.query.filter(Business.user_id == user.id,
+                             db.func.lower(Business.name) == name.lower()).first():
+        return jsonify({'error': f'You already have a business named "{name}".'}), 409
+    b = Business(user_id=user.id, name=name)
+    db.session.add(b)
+    db.session.commit()
+    return jsonify(_business_dict(b, owner=user)), 201
+
+
+@app.route('/api/v1/businesses/<int:business_id>', methods=['PATCH'])
+@api_key_required('businesses:write')
+def api_update_business(business_id):
+    user = g.api_user
+    b = Business.query.filter_by(id=business_id, user_id=user.id).first()
+    if not b:
+        return jsonify({'error': 'Business not found.'}), 404
+    data, bad = _json_object_or_422()
+    if bad:
+        return bad
+    bad = _check_api_fields(data, {'name'})
+    if bad:
+        return bad
+    if 'name' not in data:
+        return jsonify({'error': 'Send name to change it.'}), 422
+    name, error = _api_text_field(data, 'name', 100, required=True)
+    if error:
+        return jsonify({'error': error}), 422
+    if Business.query.filter(Business.user_id == user.id, Business.id != b.id,
+                             db.func.lower(Business.name) == name.lower()).first():
+        return jsonify({'error': f'You already have a business named "{name}".'}), 409
+    b.name = name
+    db.session.commit()
+    return jsonify(_business_dict(b, owner=user))
+
+
+@app.route('/api/v1/businesses/<int:business_id>', methods=['DELETE'])
+@api_key_required('businesses:write')
+def api_delete_business(business_id):
+    """As deleting a vehicle: trips are kept and lose the link."""
+    user = g.api_user
+    b = Business.query.filter_by(id=business_id, user_id=user.id).first()
+    if not b:
+        return jsonify({'error': 'Business not found.'}), 404
+    Trip.query.filter_by(business_id=b.id).update({'business_id': None})
+    if user.default_business_id == b.id:
+        user.default_business_id = None
+    db.session.delete(b)
+    db.session.commit()
+    app.logger.info('API key %s (%s) deleted business %s for user %s',
+                    g.api_key.id, g.api_key.public_id, business_id, user.id)
+    return jsonify({'deleted': business_id})
 
 
 @app.route('/api/v1/businesses', methods=['GET'])

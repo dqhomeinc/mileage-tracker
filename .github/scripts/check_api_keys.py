@@ -170,10 +170,12 @@ for path in ('/', '/history', '/profile', '/my-vehicles'):
     resp = anon.get(path, headers=auth(JANE_KEY))
     expect(f'a key does not open {path}', resp.status_code in (302, 401), True)
 
-# There is no API route that writes reference data or touches trips.
-for method, path in (('POST', '/api/v1/vehicles'), ('DELETE', '/api/v1/vehicles'),
-                     ('POST', '/api/v1/businesses'), ('PATCH', '/api/v1/trips'),
-                     ('DELETE', '/api/v1/trips')):
+# Writing is addressed to one record by id. The collection itself cannot be
+# replaced or wiped, whatever the key is allowed to do.
+for method, path in (('DELETE', '/api/v1/vehicles'), ('PUT', '/api/v1/vehicles'),
+                     ('DELETE', '/api/v1/businesses'), ('PUT', '/api/v1/businesses'),
+                     ('PATCH', '/api/v1/trips'), ('DELETE', '/api/v1/trips'),
+                     ('PUT', '/api/v1/trips')):
     code = anon.open(path, method=method, headers=auth(JANE_KEY)).status_code
     expect(f'{method} {path} is not a route', code, 405)
 
@@ -451,6 +453,15 @@ with main.app.app_context():
 
 # ── Per-key permissions ─────────────────────────────────────────────────
 def scoped_key(*scopes):
+    # An account holds at most MAX_ACTIVE_API_KEYS at once, and these checks mint
+    # many. Retire the oldest scoped ones directly to stay clear of the cap --
+    # the cap itself is not what is under test here.
+    with main.app.app_context():
+        live = (main.ApiKey.query.filter_by(user_id=JANE_ID, revoked_at=None)
+                .filter(main.ApiKey.name.like('scoped %')).order_by(main.ApiKey.id).all())
+        for old in live[:max(0, len(live) - (main.MAX_ACTIVE_API_KEYS - 8))]:
+            old.revoked_at = main._utcnow()
+        main.db.session.commit()
     resp = mint(jane_client, name='scoped ' + '+'.join(scopes), scopes=scopes)
     expect(f'a key with {scopes} is created', resp.status_code, 200)
     return field(resp, 'key')
@@ -486,6 +497,10 @@ ROUTES = {
     'trips:delete':    lambda c, k: c.delete(f'/api/v1/trips/{make_trip()}', headers=auth(k)),
     'vehicles:read':   lambda c, k: c.get('/api/v1/vehicles', headers=auth(k)),
     'businesses:read': lambda c, k: c.get('/api/v1/businesses', headers=auth(k)),
+    'vehicles:write':  lambda c, k: c.post('/api/v1/vehicles', headers=auth(k),
+                                           json={'name': f'V{make_trip()}'}),
+    'businesses:write': lambda c, k: c.post('/api/v1/businesses', headers=auth(k),
+                                            json={'name': f'B{make_trip()}'}),
 }
 expect('every scope has a route under test', set(ROUTES), set(main.API_SCOPES))
 
@@ -805,6 +820,99 @@ for name in ('trips:read', 'trips:update', 'trips:delete'):
     expect(f'{name} is not pre-ticked in the form', 'checked' in tag, False)
 expect('trips:create is pre-ticked',
        'checked' in [l for l in page.splitlines() if 'value="trips:create"' in l][0], True)
+
+# ── Writing vehicles and businesses ─────────────────────────────────────
+wk = scoped_key('vehicles:write', 'businesses:write')
+V = '/api/v1/vehicles'
+B = '/api/v1/businesses'
+
+r = anon.post(V, headers=auth(wk), json={'name': ' Van ', 'year': '2021', 'make': 'Ford', 'model': 'Transit'})
+expect('a vehicle is added', (r.status_code, field(r, 'name'), field(r, 'sub')),
+       (201, 'Van', '2021 Ford Transit'))
+VAN = field(r, 'id')
+with main.app.app_context():
+    expect('for the key\'s owner', main.db.session.get(main.Vehicle, VAN).user_id, JANE_ID)
+    expect('and never as the default', main.db.session.get(main.User, JANE_ID).default_vehicle_id
+           == VAN, False)
+expect('the same name again (any case) is a 409',
+       anon.post(V, headers=auth(wk), json={'name': 'VAN'}).status_code, 409)
+expect('another account may use the name',
+       anon.post(V, headers=auth(field(mint(bob_client, name='b2'), 'key')),
+                 json={'name': 'Van'}).status_code, 201)
+for label, body in (('no name', {}), ('a blank name', {'name': '  '}), ('a non-string name', {'name': 5}),
+                    ('an over-long name', {'name': 'x' * 101}), ('an over-long year', {'name': 'Q', 'year': '20211'}),
+                    ('an unknown field', {'name': 'Q', 'colour': 'red'}),
+                    ('a non-string year', {'name': 'Q', 'year': 2021})):
+    expect(f'adding a vehicle with {label} is refused',
+           anon.post(V, headers=auth(wk), json=body).status_code, 422)
+expect('a list body is refused', anon.post(V, headers=auth(wk), json=[1]).status_code, 422)
+
+r = anon.patch(f'{V}/{VAN}', headers=auth(wk), json={'make': 'Mercedes'})
+expect('a vehicle is partly updated', (r.status_code, field(r, 'sub')), (200, '2021 Mercedes Transit'))
+expect('and the name was kept', field(r, 'name'), 'Van')
+expect('null clears an optional field',
+       field(anon.patch(f'{V}/{VAN}', headers=auth(wk), json={'year': None}), 'year'), None)
+expect('a name cannot be blanked', anon.patch(f'{V}/{VAN}', headers=auth(wk), json={'name': None}).status_code, 422)
+expect('an empty update is refused', anon.patch(f'{V}/{VAN}', headers=auth(wk), json={}).status_code, 422)
+other = field(anon.post(V, headers=auth(wk), json={'name': 'Other'}), 'id')
+expect('renaming onto another vehicle is a 409',
+       anon.patch(f'{V}/{other}', headers=auth(wk), json={'name': 'van'}).status_code, 409)
+expect('renaming a vehicle to itself is fine',
+       anon.patch(f'{V}/{VAN}', headers=auth(wk), json={'name': 'VAN'}).status_code, 200)
+expect('another account\'s vehicle is a 404',
+       anon.patch(f'{V}/{bobs_v}', headers=auth(wk), json={'name': 'mine now'}).status_code, 404)
+with main.app.app_context():
+    expect('and was not renamed', main.db.session.get(main.Vehicle, bobs_v).name != 'mine now', True)
+
+# Deleting keeps the trips and clears the link, and the default if it was one.
+linked = make_trip(vehicle_id=VAN)
+with main.app.app_context():
+    main.db.session.get(main.User, JANE_ID).default_vehicle_id = VAN
+    main.db.session.commit()
+expect('another account\'s vehicle cannot be deleted',
+       anon.delete(f'{V}/{bobs_v}', headers=auth(wk)).status_code, 404)
+r = anon.delete(f'{V}/{VAN}', headers=auth(wk))
+expect('a vehicle is deleted', (r.status_code, field(r, 'deleted')), (200, VAN))
+with main.app.app_context():
+    expect('the trip that used it is kept', main.db.session.get(main.Trip, linked) is not None, True)
+    expect('and loses the link', main.db.session.get(main.Trip, linked).vehicle_id, None)
+    expect('the default is cleared', main.db.session.get(main.User, JANE_ID).default_vehicle_id, None)
+    expect('another account\'s vehicle survived', main.db.session.get(main.Vehicle, bobs_v) is not None, True)
+expect('deleting it again is a 404', anon.delete(f'{V}/{VAN}', headers=auth(wk)).status_code, 404)
+
+r = anon.post(B, headers=auth(wk), json={'name': 'Acme'})
+expect('a business is added', (r.status_code, field(r, 'name')), (201, 'Acme'))
+ACME = field(r, 'id')
+expect('a duplicate business name is a 409', anon.post(B, headers=auth(wk), json={'name': 'acme'}).status_code, 409)
+for label, body in (('no name', {}), ('a blank name', {'name': ''}), ('a numeric name', {'name': 1}),
+                    ('an over-long name', {'name': 'x' * 101}), ('an extra field', {'name': 'Z', 'a': 1})):
+    expect(f'adding a business with {label} is refused', anon.post(B, headers=auth(wk), json=body).status_code, 422)
+expect('a business is renamed',
+       field(anon.patch(f'{B}/{ACME}', headers=auth(wk), json={'name': 'Acme Inc'}), 'name'), 'Acme Inc')
+expect('a rename needs a name', anon.patch(f'{B}/{ACME}', headers=auth(wk), json={}).status_code, 422)
+bobs_b = None
+with main.app.app_context():
+    nb = main.Business(user_id=BOB_ID, name='BobCo'); main.db.session.add(nb); main.db.session.commit(); bobs_b = nb.id
+expect('another account\'s business is a 404 to rename',
+       anon.patch(f'{B}/{bobs_b}', headers=auth(wk), json={'name': 'x'}).status_code, 404)
+expect('and to delete', anon.delete(f'{B}/{bobs_b}', headers=auth(wk)).status_code, 404)
+linked_b = make_trip(business_id=ACME)
+expect('a business is deleted', anon.delete(f'{B}/{ACME}', headers=auth(wk)).status_code, 200)
+with main.app.app_context():
+    expect('its trip is kept and unlinked', (main.db.session.get(main.Trip, linked_b) is not None,
+           main.db.session.get(main.Trip, linked_b).business_id), (True, None))
+
+# Write does not imply read, and read does not imply write.
+only_w = scoped_key('vehicles:write')
+expect('a write-only key cannot list', anon.get(V, headers=auth(only_w)).status_code, 403)
+only_r = scoped_key('vehicles:read', 'businesses:read')
+expect('a read-only key cannot add',
+       (anon.post(V, headers=auth(only_r), json={'name': 'N'}).status_code,
+        anon.post(B, headers=auth(only_r), json={'name': 'N'}).status_code), (403, 403))
+expect('vehicles:write does not allow businesses',
+       anon.post(B, headers=auth(only_w), json={'name': 'N'}).status_code, 403)
+expect('the write scopes are opt-in at creation',
+       set(main.API_DEFAULT_SCOPES) & {'vehicles:write', 'businesses:write'}, set())
 
 measure_patch.stop()
 os.unlink(_db.name)

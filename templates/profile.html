@@ -330,8 +330,9 @@
     <div class="field">
       <label>Permissions</label>
       <div class="key-note" style="margin-bottom:8px">
-        Start with the least a key needs. Reading history, editing and deleting
-        trips are off by default; deleting can't be undone.
+        Start with the least a key needs. Reading history, editing or deleting
+        trips, and changing vehicles or businesses are off by default; deleting
+        can't be undone.
       </div>
       <div class="scope-picker" id="scopePicker">
         {% for name, label in api_scopes.items() %}
@@ -710,6 +711,12 @@ function setupBlock(fullKey, scopes) {
   }
   if (can('vehicles:read'))   lines.push('GET /api/v1/vehicles    - vehicle ids for vehicle_id');
   if (can('businesses:read')) lines.push('GET /api/v1/businesses  - business ids for business_id');
+  if (can('vehicles:write'))
+    lines.push('POST /api/v1/vehicles {name, year, make, model}; PATCH/DELETE /api/v1/vehicles/<id>',
+               '  (deleting keeps the trips and clears their vehicle)');
+  if (can('businesses:write'))
+    lines.push('POST /api/v1/businesses {name}; PATCH/DELETE /api/v1/businesses/<id>',
+               '  (deleting keeps the trips and clears their business)');
   lines.push('',
     'This key can only: ' + scopes.join(', ') + '.',
     'Anything else returns 403.');
