@@ -14,6 +14,8 @@ one of them fails silently:
   - distance is measured rather than taken from the request
   - a key's requests are bounded, including the ones that fail validation
   - a trip logged by a key is identifiable as such afterwards, by which key
+  - a key can do only what it was created with, and each scope gates exactly
+    the routes that need it
 
 Run as a script so it fits the other checks in this directory; no test runner.
 """
@@ -96,8 +98,11 @@ def signed_in(email):
     return client
 
 
-def mint(client, name='AJ', password=PASSWORD):
-    return client.post('/profile/api-keys', json={'name': name, 'password': password})
+def mint(client, name='AJ', password=PASSWORD, scopes=tuple(main.API_SCOPES)):
+    # Every permission unless a check says otherwise, so the checks that are
+    # about something other than permissions are not also testing them.
+    return client.post('/profile/api-keys',
+                       json={'name': name, 'password': password, 'scopes': list(scopes)})
 
 
 def auth(key):
@@ -425,6 +430,111 @@ expect('with no key attributed', rows[WEB_TRIP]['via_api_key'], None)
 with main.app.app_context():
     expect('recorded as coming from the web',
            main.db.session.get(main.Trip, WEB_TRIP).created_via, 'web')
+
+# ── Per-key permissions ─────────────────────────────────────────────────
+def scoped_key(*scopes):
+    resp = mint(jane_client, name='scoped ' + '+'.join(scopes), scopes=scopes)
+    expect(f'a key with {scopes} is created', resp.status_code, 200)
+    return field(resp, 'key')
+
+
+ROUTES = {
+    'trips:create':    lambda c, k: c.post('/api/v1/trips', headers=auth(k),
+                                           json={**BODY, 'started_at': '2026-11-01T08:00',
+                                                 'ended_at': '2026-11-01T08:30'}),
+    'vehicles:read':   lambda c, k: c.get('/api/v1/vehicles', headers=auth(k)),
+    'businesses:read': lambda c, k: c.get('/api/v1/businesses', headers=auth(k)),
+}
+expect('every scope has a route under test', set(ROUTES), set(main.API_SCOPES))
+
+# Each key holds exactly one scope; it must open its own route and no other.
+for held in main.API_SCOPES:
+    k = scoped_key(held)
+    for needed, call in ROUTES.items():
+        code = call(anon, k).status_code
+        if needed == held:
+            expect(f'a key holding only {held} opens {needed}', code in (200, 201), True)
+        else:
+            expect(f'a key holding only {held} is refused {needed}', code, 403)
+
+refused = ROUTES['trips:create'](anon, scoped_key('vehicles:read'))
+expect('the refusal names the missing permission',
+       'trips:create' in err(refused), True)
+with main.app.app_context():
+    before = main.Trip.query.filter_by(user_id=JANE_ID).count()
+ROUTES['trips:create'](anon, scoped_key('businesses:read'))
+with main.app.app_context():
+    expect('and a refused trip is not logged',
+           main.Trip.query.filter_by(user_id=JANE_ID).count(), before)
+
+# A refused request still spends the budget and shows the key as used: probing
+# for what a key can reach must not be free.
+probe = scoped_key('vehicles:read')
+ROUTES['trips:create'](anon, probe)
+with main.app.app_context():
+    row = main.ApiKey.query.filter_by(
+        public_id=main.parse_api_key(probe)[0]).first()
+    expect('a refused request still counts as use', row.last_used_at is not None, True)
+    expect('and spends the budget', row.window_count, 1)
+
+# A bad key is still a 401, not a 403: a missing scope must not be how someone
+# learns that a key exists.
+expect('an unknown key is 401 on a scoped route',
+       ROUTES['trips:create'](anon, 'mtk_000000000000.' + 'a' * 43).status_code, 401)
+
+both = scoped_key('vehicles:read', 'businesses:read')
+expect('a key can hold several permissions at once',
+       (ROUTES['vehicles:read'](anon, both).status_code,
+        ROUTES['businesses:read'](anon, both).status_code,
+        ROUTES['trips:create'](anon, both).status_code), (200, 200, 403))
+
+# Creation must say what the key may do.
+for label, body in (('no scopes field', {}),
+                    ('an empty list', {'scopes': []}),
+                    ('a string instead of a list', {'scopes': 'trips:create'}),
+                    ('a non-string entry', {'scopes': [1]}),
+                    ('an unknown scope', {'scopes': ['trips:create', 'trips:delete']}),
+                    ('only unknown scopes', {'scopes': ['admin']})):
+    resp = jane_client.post('/profile/api-keys',
+                            json={'name': 'x', 'password': PASSWORD, **body})
+    expect(f'creating with {label} is refused', resp.status_code, 400)
+
+with main.app.app_context():
+    n = main.ApiKey.query.filter_by(user_id=JANE_ID).count()
+jane_client.post('/profile/api-keys', json={'name': 'x', 'password': PASSWORD})
+with main.app.app_context():
+    expect('and a refused creation stores nothing',
+           main.ApiKey.query.filter_by(user_id=JANE_ID).count(), n)
+
+# Duplicates and ordering are normalised; the key is never widened by repeating.
+dup = mint(jane_client, name='dup', scopes=['vehicles:read', 'vehicles:read'])
+expect('repeating a scope is harmless', field(dup, 'api_key', {}).get('scopes'),
+       ['vehicles:read'])
+
+# The profile shows what each key holds, and the form offers every scope.
+page = jane_client.get('/profile').get_data(as_text=True)
+for name in main.API_SCOPES:
+    expect(f'the profile form offers {name}', f'value="{name}"' in page, True)
+
+# A blank or unrecognised stored value grants nothing, never everything.
+expect('a blank stored value grants nothing', main.parse_scopes(''), [])
+expect('a missing stored value grants nothing', main.parse_scopes(None), [])
+expect('unrecognised names are dropped', main.parse_scopes('trips:create,root'),
+       ['trips:create'])
+
+# The decorator refuses to be applied without a real scope, so a route cannot
+# be added that is open to every key by accident.
+for bad in ('trips:delete', None):
+    try:
+        main.api_key_required(bad)
+        expect(f'api_key_required({bad!r}) is rejected', 'accepted', 'rejected')
+    except ValueError:
+        pass
+try:
+    main.api_key_required(lambda: None)
+    expect('using the decorator bare is rejected', 'accepted', 'rejected')
+except ValueError:
+    pass
 
 measure_patch.stop()
 os.unlink(_db.name)
