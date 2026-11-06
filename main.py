@@ -183,14 +183,40 @@ class User(UserMixin, db.Model):
         return check_password_hash(self.password_hash, password)
 
 
+# What a key may be allowed to do. Each entry is one capability, named for the
+# resource and the verb, and each maps to exactly the routes that need it. The
+# order here is the order the profile lists them in.
+#
+# Deliberately only things the API can already do. A scope with no route behind
+# it is a permission nobody can use, and listing it would make the key look more
+# capable than it is.
+API_SCOPES = {
+    'trips:create':    'Log trips',
+    'vehicles:read':   'Read your vehicles',
+    'businesses:read': 'Read your businesses',
+}
+
+
+def parse_scopes(raw):
+    """The scopes a stored value grants, as a list in registry order.
+
+    Anything unrecognised is dropped rather than trusted, and an empty or
+    missing value grants nothing. Failing closed matters here: a row whose
+    column was never filled in must not read as "everything".
+    """
+    held = {x for x in (raw or '').split(',') if x}
+    return [name for name in API_SCOPES if name in held]
+
+
 class ApiKey(db.Model):
     """A scoped credential a user issues so an agent can log trips for them.
 
     The point of it is what it *cannot* do. A user who wants a script or an
     assistant to log trips on their behalf would otherwise have to hand over
-    their password, which is complete account access. A key is create-trips
-    and read-reference-data only, belongs to one account, and can be revoked
-    without touching the password or signing anyone out.
+    their password, which is complete account access. A key can do only the
+    things its owner ticked when creating it (see API_SCOPES), at most creating
+    trips and reading reference data, belongs to one account, and can be
+    revoked without touching the password or signing anyone out.
 
     Stored as a hash, unlike User.logging_key, because the two have opposite
     requirements: a logging key has to be displayable in the profile for ever,
@@ -222,10 +248,22 @@ class ApiKey(db.Model):
     # here costs no extra query and nothing accumulates to prune.
     window_started_at = db.Column(db.DateTime, nullable=True)
     window_count = db.Column(db.Integer, nullable=True)
+    # Comma-separated names from API_SCOPES. Fixed at creation and not editable
+    # afterwards: widening a key's reach without issuing a new secret would let
+    # a stolen session quietly upgrade a credential someone else already holds.
+    # Minting is cheap, so the way to change what a key can do is to replace it.
+    scopes = db.Column(db.String(200), nullable=False, default='')
 
     @property
     def active(self):
         return self.revoked_at is None
+
+    @property
+    def scope_list(self):
+        return parse_scopes(self.scopes)
+
+    def allows(self, scope):
+        return scope in self.scope_list
 
 
 class Vehicle(db.Model):
@@ -494,6 +532,14 @@ def _migrate_db():
                 conn.execute(db.text('ALTER TABLE api_key ADD COLUMN window_started_at TIMESTAMP'))
             if 'window_count' not in existing_key_cols:
                 conn.execute(db.text('ALTER TABLE api_key ADD COLUMN window_count INTEGER'))
+            if 'scopes' not in existing_key_cols:
+                conn.execute(db.text("ALTER TABLE api_key ADD COLUMN scopes VARCHAR(200) NOT NULL DEFAULT ''"))
+                # Keys that already exist could do all of this before scopes
+                # were a thing, so they keep doing it. Only here, once, when
+                # the column is first added -- everywhere else a blank value
+                # grants nothing.
+                conn.execute(db.text('UPDATE api_key SET scopes = :s'),
+                             {'s': ','.join(API_SCOPES)})
 
         if 'logging_key' not in existing_user_cols:
             conn.execute(db.text('ALTER TABLE "user" ADD COLUMN logging_key VARCHAR(32)'))
@@ -2290,6 +2336,7 @@ def _api_key_dict(key):
         'last_used_at': key.last_used_at.strftime('%b %d, %Y at %H:%M')
                         if key.last_used_at else None,
         'active': key.active,
+        'scopes': key.scope_list,
     }
 
 
@@ -2308,6 +2355,7 @@ def profile():
         email=current_user.email,
         photo_data=current_user.photo_data,
         api_keys=[_api_key_dict(k) for k in _owned_api_keys()],
+        api_scopes=API_SCOPES,
         api_base_url=request.url_root.rstrip('/'),
     )
 
@@ -2332,6 +2380,18 @@ def create_api_key():
     if not name:
         return jsonify({'error': 'Give the key a name, so you can tell it apart later.'}), 400
 
+    # Required, not defaulted. A caller that forgets to say what the key may do
+    # should be told so, not handed everything.
+    requested = data.get('scopes')
+    if not isinstance(requested, list) or not all(isinstance(x, str) for x in requested):
+        return jsonify({'error': 'Choose what this key is allowed to do.'}), 400
+    unknown = sorted(set(requested) - set(API_SCOPES))
+    if unknown:
+        return jsonify({'error': f'Unknown permission: {unknown[0]}.'}), 400
+    granted = parse_scopes(','.join(requested))
+    if not granted:
+        return jsonify({'error': 'Choose at least one thing this key is allowed to do.'}), 400
+
     active = ApiKey.query.filter_by(user_id=current_user.id, revoked_at=None).count()
     if active >= MAX_ACTIVE_API_KEYS:
         return jsonify({'error': f'You already have {MAX_ACTIVE_API_KEYS} active keys. '
@@ -2339,7 +2399,8 @@ def create_api_key():
 
     public_id, secret, full_key = generate_api_key()
     key = ApiKey(user_id=current_user.id, name=name, public_id=public_id,
-                 secret_hash=_hash_api_secret(secret), created_at=_utcnow())
+                 secret_hash=_hash_api_secret(secret), created_at=_utcnow(),
+                 scopes=','.join(granted))
     db.session.add(key)
     db.session.commit()
 
@@ -2646,13 +2707,26 @@ def _count_api_request(key):
             .filter(ApiKey.id == key.id).scalar() or 0)
 
 
-def api_key_required(view):
-    """Authenticate by API key, or refuse.
+def api_key_required(scope):
+    """Authenticate by API key and require it to hold `scope`, or refuse.
+
+    The scope is a required argument rather than an optional one, so a new route
+    cannot be added that forgets to say what it needs -- it would fail to import
+    instead of silently being open to every key.
 
     Sets g.api_key and g.api_user. Does not touch the login session: these
     routes are for clients that have no browser, and a key must not become a
     way to reach anything that only @login_required protects.
     """
+    if scope not in API_SCOPES:
+        raise ValueError(f'Unknown API scope: {scope!r}')
+
+    def decorate(view):
+        return _scoped(view, scope)
+    return decorate
+
+
+def _scoped(view, scope):
     @wraps(view)
     def wrapped(*args, **kwargs):
         key = _api_key_from_request()
@@ -2683,6 +2757,15 @@ def api_key_required(view):
                 'error': f'Rate limit exceeded: at most {API_RATE_LIMIT} requests '
                          f'per {minutes} minutes for this key.'
             }), 429
+
+        # After the request is counted, so a key probing for what it can reach
+        # still spends its budget and shows as used. Unlike a bad key this does
+        # say what is wrong: the caller has proved it holds a real key, so
+        # naming the missing permission reveals nothing it could not already do.
+        if not key.allows(scope):
+            return jsonify({
+                'error': f'This API key does not have the "{scope}" permission.'
+            }), 403
 
         g.api_key = key
         g.api_user = user
@@ -2729,7 +2812,7 @@ _API_TRIP_FIELDS = {'start_location', 'end_location', 'started_at', 'ended_at',
 
 
 @app.route('/api/v1/trips', methods=['POST'])
-@api_key_required
+@api_key_required('trips:create')
 def api_create_trip():
     """Log one trip for the key's owner.
 
@@ -2844,7 +2927,7 @@ def api_create_trip():
 
 
 @app.route('/api/v1/vehicles', methods=['GET'])
-@api_key_required
+@api_key_required('vehicles:read')
 def api_list_vehicles():
     """The key owner's vehicles, so a client can send a valid vehicle_id.
 
@@ -2856,7 +2939,7 @@ def api_list_vehicles():
 
 
 @app.route('/api/v1/businesses', methods=['GET'])
-@api_key_required
+@api_key_required('businesses:read')
 def api_list_businesses():
     """The key owner's businesses. Read only, as above."""
     bs = (Business.query.filter_by(user_id=g.api_user.id)

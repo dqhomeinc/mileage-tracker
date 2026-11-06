@@ -167,6 +167,20 @@
     .key-revoke:hover { border-color: #EF4444; color: #EF4444; }
     .key-revoke:disabled { opacity: .5; cursor: not-allowed; }
     .key-revoked-tag { font-size: .74rem; color: var(--muted); flex-shrink: 0; padding: 5px 0; }
+    .scope-picker { display: flex; flex-direction: column; gap: 8px; }
+    .scope-option {
+      display: flex; align-items: flex-start; gap: 10px; cursor: pointer;
+      border: 1.5px solid var(--border); border-radius: var(--radius-sm);
+      padding: 10px 12px; text-transform: none; letter-spacing: 0; margin: 0;
+    }
+    .scope-option input { margin-top: 3px; width: auto; flex-shrink: 0; }
+    .scope-option span { display: flex; flex-direction: column; gap: 2px; font-size: .86rem; font-weight: 400; color: var(--text); }
+    .scope-option code { font-size: .74rem; color: var(--muted); }
+    .key-scopes { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+    .key-scope {
+      font-size: .7rem; font-family: monospace; color: var(--primary);
+      background: #EEF2FF; border-radius: 6px; padding: 2px 7px;
+    }
     .key-empty { font-size: .84rem; color: var(--muted); margin-bottom: 16px; }
     /* The one-time reveal. Deliberately loud: it is the only time the key is
        ever shown, and a user who closes the page without copying it has to
@@ -284,10 +298,11 @@
     </div>
 
     <p class="key-note">
-      An API key lets a script or an assistant log trips for you
-      <strong>without your password</strong>. A key can create trips and read
-      your vehicles and businesses — it cannot read, edit or delete trips, reach
-      your account details, or sign in to this site.
+      An API key lets a script or an assistant act for you
+      <strong>without your password</strong>. You choose what each key may do
+      when you create it, and that can't be changed afterwards — to change a
+      key's permissions, revoke it and create a new one. No key can read, edit
+      or delete trips, reach your account details, or sign in to this site.
       Revoke one any time; nothing else about your account changes.
     </p>
 
@@ -311,6 +326,17 @@
       <label for="apiKeyName">Key Name</label>
       <input type="text" id="apiKeyName" maxlength="60" autocomplete="off"
              placeholder="What will use this key?">
+    </div>
+    <div class="field">
+      <label>Permissions</label>
+      <div class="scope-picker" id="scopePicker">
+        {% for name, label in api_scopes.items() %}
+        <label class="scope-option">
+          <input type="checkbox" name="apiScope" value="{{ name }}" checked>
+          <span><strong>{{ label }}</strong><code>{{ name }}</code></span>
+        </label>
+        {% endfor %}
+      </div>
     </div>
     <div class="field">
       <label for="apiKeyPassword">Confirm Your Password</label>
@@ -638,6 +664,7 @@ function renderApiKeys() {
         <div class="key-row-name">${escHtml(k.name)}</div>
         <div class="key-row-meta">${meta}</div>
         <div class="key-row-id">${escHtml(k.public_id)}</div>
+        <div class="key-scopes">${(k.scopes || []).map(sc => `<span class="key-scope">${escHtml(sc)}</span>`).join('')}</div>
       </div>
       ${action}
     </li>`;
@@ -646,35 +673,40 @@ function renderApiKeys() {
 
 // Everything the person handing this to an agent needs, with their own base
 // URL filled in, so they pass on something complete instead of paraphrasing.
-function setupBlock(fullKey) {
-  return [
-    `Base URL: ${API_BASE}`,
-    `Key:      ${fullKey}`,
-    '',
-    'POST /api/v1/trips',
-    'Authorization: Bearer <key>',
-    'Content-Type: application/json',
-    '',
-    '{ "start_location": "Lexington, MA",',
-    '  "end_location":   "Clinton Street, Newton",',
-    '  "started_at":     "2026-10-08T08:29",',
-    '  "ended_at":       "2026-10-08T09:10",',
-    '  "notes":          "business site visit",',
-    '  "vehicle_id":     1 }',
-    '',
-    'GET /api/v1/vehicles    - vehicle ids for vehicle_id',
-    'GET /api/v1/businesses  - business ids for business_id',
-    '',
-    'Notes for whoever is calling this:',
-    '- Local wall-clock times only. A UTC offset is refused, because trips',
-    '  are stored as local time and there is no timezone to convert from.',
-    '- Distance is measured server-side. "miles" is optional and used only',
-    '  if measuring fails.',
-    '- The server sleeps when idle, so the first call after a quiet period',
-    '  can take about 60s. Allow a 90s timeout and do not retry on timeout:',
-    '  the request has usually landed, and retrying logs the trip twice.',
-    '- 201 created, 401 bad key, 422 bad payload (the message names the field).',
-  ].join('\n');
+function setupBlock(fullKey, scopes) {
+  const can = name => scopes.includes(name);
+  const lines = [`Base URL: ${API_BASE}`, `Key:      ${fullKey}`, '',
+                 'Authorization: Bearer <key>', 'Content-Type: application/json', ''];
+  if (can('trips:create')) {
+    lines.push(
+      'POST /api/v1/trips',
+      '{ "start_location": "Lexington, MA",',
+      '  "end_location":   "Clinton Street, Newton",',
+      '  "started_at":     "2026-10-08T08:29",',
+      '  "ended_at":       "2026-10-08T09:10",',
+      '  "notes":          "business site visit",',
+      '  "vehicle_id":     1 }',
+      '');
+  }
+  if (can('vehicles:read'))   lines.push('GET /api/v1/vehicles    - vehicle ids for vehicle_id');
+  if (can('businesses:read')) lines.push('GET /api/v1/businesses  - business ids for business_id');
+  lines.push('',
+    'This key can only: ' + scopes.join(', ') + '.',
+    'Anything else returns 403.');
+  if (can('trips:create')) {
+    lines.push('',
+      'Notes for whoever is calling this:',
+      '- Local wall-clock times only. A UTC offset is refused, because trips',
+      '  are stored as local time and there is no timezone to convert from.',
+      '- Distance is measured server-side. "miles" is optional and used only',
+      '  if measuring fails.',
+      '- The server sleeps when idle, so the first call after a quiet period',
+      '  can take about 60s. Allow a 90s timeout and do not retry on timeout:',
+      '  the request has usually landed, and retrying logs the trip twice.',
+      '- 201 created, 401 bad key, 403 missing permission, 422 bad payload',
+      '  (the message names the field).');
+  }
+  return lines.join('\n');
 }
 
 async function createApiKey() {
@@ -686,6 +718,11 @@ async function createApiKey() {
   if (!nameEl.value.trim()) {
     setApiKeyMsg('Give the key a name, so you can tell it apart later.', 'error');
     nameEl.focus();
+    return;
+  }
+  const scopes = [...document.querySelectorAll('input[name="apiScope"]:checked')].map(el => el.value);
+  if (!scopes.length) {
+    setApiKeyMsg('Choose at least one thing this key is allowed to do.', 'error');
     return;
   }
   if (!pwEl.value) {
@@ -701,14 +738,14 @@ async function createApiKey() {
     const resp = await fetch('/profile/api-keys', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: nameEl.value, password: pwEl.value })
+      body: JSON.stringify({ name: nameEl.value, password: pwEl.value, scopes })
     });
     const data = await resp.json();
     if (!resp.ok) { setApiKeyMsg(data.error || 'Could not create a key.', 'error'); return; }
 
     lastMintedKey = data.key;
     document.getElementById('keyRevealValue').textContent = data.key;
-    document.getElementById('keySetup').textContent = setupBlock(data.key);
+    document.getElementById('keySetup').textContent = setupBlock(data.key, data.api_key.scopes);
     document.getElementById('keyReveal').classList.remove('d-none');
 
     apiKeys.unshift(data.api_key);
