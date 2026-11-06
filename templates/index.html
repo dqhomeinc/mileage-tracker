@@ -378,16 +378,6 @@
     }
     .btn-modal-save:hover { opacity: .9; }
     .btn-modal-save:disabled { opacity: .6; cursor: not-allowed; }
-    .btn-modal-danger {
-      padding: 10px 20px; border-radius: var(--radius-sm);
-      background: #DC2626; border: none; color: white;
-      font-size: .88rem; font-weight: 600; cursor: pointer;
-      font-family: 'Inter', sans-serif; transition: background .15s;
-    }
-    .btn-modal-danger:hover { background: #B91C1C; }
-    .confirm-box { max-width: 400px; }
-    .confirm-box .modal-footer { padding-top: 24px; }
-    .confirm-message { color: var(--muted); font-size: .92rem; line-height: 1.5; margin: 0; }
     .history-empty {
       text-align: center; padding: 44px 0; color: var(--muted); font-size: 0.9rem;
     }
@@ -502,6 +492,7 @@
 
 {% set show_time_toggle = true %}
 {% include '_navbar.html' %}
+{% include '_confirm_dialog.html' %}
 
 <div class="page">
 
@@ -670,23 +661,6 @@
     </div>
   </div>
 
-</div>
-
-<!-- Confirm dialog (in-page replacement for window.confirm) -->
-<div class="modal-overlay" id="confirmModal">
-  <div class="modal-box confirm-box" role="alertdialog" aria-modal="true"
-       aria-labelledby="confirmTitle" aria-describedby="confirmMessage">
-    <div class="modal-header">
-      <div class="modal-title"><i class="fas fa-trash-alt" style="color:#DC2626"></i> <span id="confirmTitle">Delete trip?</span></div>
-    </div>
-    <div class="modal-body">
-      <p class="confirm-message" id="confirmMessage"></p>
-    </div>
-    <div class="modal-footer">
-      <button type="button" class="btn-modal-cancel" id="confirmCancel">Cancel</button>
-      <button type="button" class="btn-modal-danger" id="confirmOk">Delete</button>
-    </div>
-  </div>
 </div>
 
 <!-- Edit trip modal -->
@@ -2794,7 +2768,12 @@ document.getElementById('logTripBtn').addEventListener('click', async () => {
         showError(`${data.error} ${describeDuplicate(data.existing, { inline: true })}`);
         return;
       }
-      if (!confirm(`${describeDuplicate(data.existing)}\n\nLog it again anyway?`)) {
+      const logAgain = await confirmDialog({
+        title: 'Possible duplicate',
+        message: `${describeDuplicate(data.existing)}\n\nLog it again anyway?`,
+        confirmLabel: 'Log it anyway', danger: false, icon: 'fa-exclamation-triangle',
+      });
+      if (!logAgain) {
         showError('Trip not logged — it looks like you had already logged it.');
         return;
       }
@@ -2982,48 +2961,6 @@ function prependTripRow(trip, prepend = true) {
   } else {
     wrap.appendChild(row);
   }
-}
-
-// In-page replacement for window.confirm(). Resolves true on confirm and
-// false on Cancel, Escape, or a click on the backdrop.
-function confirmDialog({ title, message, confirmLabel = 'Delete' }) {
-  return new Promise(resolve => {
-    const overlay = document.getElementById('confirmModal');
-    const okBtn = document.getElementById('confirmOk');
-    const cancelBtn = document.getElementById('confirmCancel');
-    const previouslyFocused = document.activeElement;
-    document.getElementById('confirmTitle').textContent = title;
-    document.getElementById('confirmMessage').textContent = message;
-    okBtn.textContent = confirmLabel;
-
-    function finish(result) {
-      overlay.classList.remove('open');
-      okBtn.removeEventListener('click', onOk);
-      cancelBtn.removeEventListener('click', onCancel);
-      overlay.removeEventListener('click', onBackdrop);
-      document.removeEventListener('keydown', onKey, true);
-      if (previouslyFocused && previouslyFocused.focus) previouslyFocused.focus();
-      resolve(result);
-    }
-    const onOk = () => finish(true);
-    const onCancel = () => finish(false);
-    const onBackdrop = e => { if (e.target === overlay) finish(false); };
-    const onKey = e => {
-      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); finish(false); }
-      else if (e.key === 'Tab') {
-        // Keep focus inside the dialog while it is open.
-        e.preventDefault();
-        (document.activeElement === cancelBtn ? okBtn : cancelBtn).focus();
-      }
-    };
-    okBtn.addEventListener('click', onOk);
-    cancelBtn.addEventListener('click', onCancel);
-    overlay.addEventListener('click', onBackdrop);
-    document.addEventListener('keydown', onKey, true);
-    overlay.classList.add('open');
-    // Default focus on Cancel so a stray Enter cannot delete anything.
-    cancelBtn.focus();
-  });
 }
 
 async function deleteTrip(id, miles) {
