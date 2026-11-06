@@ -492,6 +492,7 @@
 
 {% set show_time_toggle = true %}
 {% include '_navbar.html' %}
+{% include '_confirm_dialog.html' %}
 
 <div class="page">
 
@@ -2767,7 +2768,12 @@ document.getElementById('logTripBtn').addEventListener('click', async () => {
         showError(`${data.error} ${describeDuplicate(data.existing, { inline: true })}`);
         return;
       }
-      if (!confirm(`${describeDuplicate(data.existing)}\n\nLog it again anyway?`)) {
+      const logAgain = await confirmDialog({
+        title: 'Possible duplicate',
+        message: `${describeDuplicate(data.existing)}\n\nLog it again anyway?`,
+        confirmLabel: 'Log it anyway', danger: false, icon: 'fa-exclamation-triangle',
+      });
+      if (!logAgain) {
         showError('Trip not logged — it looks like you had already logged it.');
         return;
       }
@@ -2958,7 +2964,12 @@ function prependTripRow(trip, prepend = true) {
 }
 
 async function deleteTrip(id, miles) {
-  if (!confirm('Delete this trip?')) return;
+  const ok = await confirmDialog({
+    title: 'Delete trip?',
+    message: 'This trip will be permanently removed from your log. This cannot be undone.',
+    confirmLabel: 'Delete',
+  });
+  if (!ok) return;
   try {
     const resp = await fetch(`/history/${id}`, { method: 'DELETE' });
     if (!resp.ok) return;

@@ -154,6 +154,7 @@
 <body>
 
 {% include '_navbar.html' %}
+{% include '_confirm_dialog.html' %}
 
 <div class="page">
 
@@ -399,7 +400,7 @@ async function uploadPhoto(input) {
 }
 
 async function removePhoto() {
-  if (!confirm('Remove your profile photo?')) return;
+  if (!await confirmDialog({ title: 'Remove profile photo?', message: 'Your profile photo will be removed.', confirmLabel: 'Remove' })) return;
   const msgEl = document.getElementById('photoMsg');
   msgEl.classList.remove('show', 'error', 'success');
   try {
@@ -486,8 +487,12 @@ function revealLoggingKey() {
                            'Checking…', 'This is your logging key.');
 }
 
-function regenerateLoggingKey() {
-  if (!confirm('Generate a new logging key?\n\nThe old one stops working immediately, so anywhere you have it written down will need updating.')) return;
+async function regenerateLoggingKey() {
+  if (!await confirmDialog({
+    title: 'Generate a new logging key?',
+    message: 'The old one stops working immediately, so anywhere you have it written down will need updating.',
+    confirmLabel: 'Generate', danger: false, icon: 'fa-key',
+  })) return;
   return requestLoggingKey('PUT', document.getElementById('regenKeyBtn'),
                            'Generating…', 'New key generated. The old one no longer works.');
 }
