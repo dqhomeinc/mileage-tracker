@@ -9,7 +9,6 @@ one of them fails silently:
   - one account's key cannot touch another's data
   - a key authenticates an API request and does NOT establish a session, so it
     cannot be used to reach anything @login_required protects
-  - the API does not require the per-trip logging key, and /log still does
   - minting costs the account password; revoking deliberately does not
   - distance is measured rather than taken from the request
   - a key's requests are bounded, including the ones that fail validation
@@ -301,14 +300,6 @@ for bad, label in ((body({'start_location': ''}), 'a blank start location'),
 expect('a non-object body is refused',
        anon.post('/api/v1/trips', headers=auth(JANE_KEY), json=[1, 2]).status_code, 422)
 
-# ── The logging key relationship ─────────────────────────────────────
-# The API deliberately does not ask for it; the form still must.
-expect('the API does not require the per-trip logging key',
-       anon.post('/api/v1/trips', headers=auth(JANE_KEY), json=body()).status_code, 201)
-expect('while /log still does',
-       jane_client.post('/log', json={'start': 'a', 'end': 'b',
-                                      'trip_date': '2026-10-08'}).status_code, 403)
-
 # ── One account's key cannot reach another's ─────────────────────────
 bob_key = field(mint(bob_client, name='bob script'), 'key')
 expect('a key cannot attach another user\'s vehicle',
@@ -446,12 +437,8 @@ expect('revoking the key leaves the trip attributed to it',
 expect('and still marked as API-logged', rows[AUDIT_TRIP]['via_api'], True)
 
 # A form-logged trip is distinguishable, which is the other half of the point.
-logging_key = main.normalize_logging_key(
-    jane_client.post('/profile/logging-key', json={'password': PASSWORD})
-    .get_json()['logging_key'])
 web = jane_client.post('/log', json={'start': 'C', 'end': 'D',
-                                     'trip_date': '2026-10-08',
-                                     'logging_key': logging_key})
+                                     'trip_date': '2026-10-08'})
 expect('a form-logged trip still logs', web.status_code, 200)
 WEB_TRIP = web.get_json()['trip']['id']
 rows = {t['id']: t for t in jane_client.get('/history').get_json()}
