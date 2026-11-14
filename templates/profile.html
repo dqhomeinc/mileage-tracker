@@ -510,6 +510,7 @@ function togglePw(btn) {
 let apiKeys = {{ api_keys|tojson }};
 const API_BASE = {{ api_base_url|tojson }};
 let lastMintedKey = null;
+let lastMintedScopes = [];
 let editingKeyId = null;
 const API_SCOPES = {{ api_scopes|tojson }};
 
@@ -570,7 +571,7 @@ function renderApiKeys() {
 
 // Everything the person handing this to an agent needs, with their own base
 // URL filled in, so they pass on something complete instead of paraphrasing.
-function setupBlock(fullKey, scopes) {
+function setupBlock(fullKey, scopes = []) {
   const can = name => scopes.includes(name);
   const lines = [`Base URL: ${API_BASE}`, `Key:      ${fullKey}`, '',
                  'Authorization: Bearer <key>', 'Content-Type: application/json', ''];
@@ -663,6 +664,7 @@ async function createApiKey() {
     if (!resp.ok) { setApiKeyMsg(data.error || 'Could not create a key.', 'error'); return; }
 
     lastMintedKey = data.key;
+    lastMintedScopes = data.api_key.scopes || [];
     document.getElementById('keyRevealValue').textContent = data.key;
     document.getElementById('keySetup').textContent = setupBlock(data.key, data.api_key.scopes);
     document.getElementById('keyReveal').classList.remove('d-none');
@@ -775,7 +777,7 @@ async function copyToClipboard(text, okMessage) {
 }
 
 const copyApiKey = () => copyToClipboard(lastMintedKey || '', 'Key copied.');
-const copyApiSetup = () => copyToClipboard(setupBlock(lastMintedKey || ''), 'Setup copied.');
+const copyApiSetup = () => copyToClipboard(setupBlock(lastMintedKey || '', lastMintedScopes), 'Setup copied.');
 
 function escHtml(str) {
   return String(str ?? '').replace(/[&<>"']/g, c =>
